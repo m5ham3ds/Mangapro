@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.util.Log
+import android.webkit.CookieManager
 import android.webkit.WebSettings
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
@@ -70,6 +71,7 @@ class ProChan : HttpSource() {
 
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
+        .addInterceptor(::cloudflare403Interceptor)
         .addNetworkInterceptor(
             CookieInterceptor(
                 domain,
@@ -89,6 +91,24 @@ class ProChan : HttpSource() {
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
         .build()
+
+    private fun cloudflare403Interceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        // Ignore scrambled image requests (127.0.0.1) and CDN requests
+        if (request.url.host != domain) return chain.proceed(request)
+
+        val response = chain.proceed(request)
+        if (response.code != 403) return response
+
+        response.close()
+        CloudflareResolver.resolve(
+            loadUrl = baseUrl,
+            cookieUrl = request.url.toString(),
+            userAgent = webViewUserAgent,
+            forceResolve = true,
+        )
+        return chain.proceed(request)
+    }
 
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
