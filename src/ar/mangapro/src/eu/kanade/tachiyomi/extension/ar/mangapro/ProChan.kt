@@ -51,7 +51,7 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.io.encoding.Base64
  
 class ProChan : HttpSource() {
-    override val name = "ProComic"
+    override val name = "ProChan"
     override val lang = "ar"
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
