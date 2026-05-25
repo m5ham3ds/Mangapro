@@ -24,11 +24,11 @@ jobs:
         run: ./gradlew spotlessApply
 
       - name: Build extension
-        run: ./gradlew :src:ar:prochan:assembleRelease
+        run: ./gradlew :src:ar:mangapro:assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: procomic-extension
+          name: mangapro-extension
           path: "**/*.apk"
           retention-days: 7
