@@ -32,6 +32,7 @@ import kotlinx.serialization.json.JsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Request
@@ -103,22 +104,14 @@ class ProChan : HttpSource() {
 
         if (response.code == 403 && allowRetry) {
             response.close()
-            // First attempt: use forceResolve = false (will check existing cookie)
-            var resolved = CloudflareResolver.resolve(
-                loadUrl = "$baseUrl/browse",
+            // Since we got a 403, the cookie is either missing or expired.
+            // Use forceResolve = true immediately to avoid double waiting.
+            val resolved = CloudflareResolver.resolve(
+                loadUrl = "$baseUrl/browse", // or baseUrl if /browse doesn't trigger Turnstile
                 cookieUrl = request.url.toString(),
                 userAgent = webViewUserAgent,
-                forceResolve = false,
+                forceResolve = true,
             )
-            if (!resolved) {
-                // Second attempt: forceResolve = true (ignore existing cookie, open WebView)
-                resolved = CloudflareResolver.resolve(
-                    loadUrl = "$baseUrl/browse",
-                    cookieUrl = request.url.toString(),
-                    userAgent = webViewUserAgent,
-                    forceResolve = true,
-                )
-            }
             if (!resolved) {
                 throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الموقع في WebView.")
             }
@@ -170,7 +163,10 @@ class ProChan : HttpSource() {
         }
 
         val key = searchKey(query, filters)
-        // FIX: use getOrPut to avoid NPE
+        // FIX: reset page counter on page == 1
+        if (page == 1) {
+            pageNumber[key] = 1
+        }
         val currentPage = pageNumber.getOrPut(key) { page }
 
         return Observable.fromCallable {
@@ -183,7 +179,7 @@ class ProChan : HttpSource() {
 
                 val data = response.parseAs<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
-                    // FIX: removed type filter (temporarily to debug missing titles)
+                    // FIX: temporarily removed type filter to debug missing titles
                     // .filter { manga -> manga.type in SUPPORTED_TYPES }
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
@@ -351,7 +347,7 @@ class ProChan : HttpSource() {
         }
     }
 
-    // FIX: improved retry with forceResolve
+    // FIX: improved retry with forceResolve = true directly
     private fun executePageListRequest(chapter: SChapter, allowRetry: Boolean): List<Page> {
         val request = pageListRequest(chapter)
         val response = client.newCall(request).execute()
@@ -361,22 +357,14 @@ class ProChan : HttpSource() {
 
         if (response.code == 403 && allowRetry) {
             response.close()
-            // First attempt: normal resolve
-            var resolved = CloudflareResolver.resolve(
+            // Since we got a 403, the cookie is either missing or expired.
+            // Use forceResolve = true immediately.
+            val resolved = CloudflareResolver.resolve(
                 loadUrl = getChapterUrl(chapter),
                 cookieUrl = request.url.toString(),
                 userAgent = webViewUserAgent,
-                forceResolve = false,
+                forceResolve = true,
             )
-            if (!resolved) {
-                // Second attempt: forceResolve = true
-                resolved = CloudflareResolver.resolve(
-                    loadUrl = getChapterUrl(chapter),
-                    cookieUrl = request.url.toString(),
-                    userAgent = webViewUserAgent,
-                    forceResolve = true,
-                )
-            }
             if (!resolved) {
                 throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الفصل في WebView.")
             }
