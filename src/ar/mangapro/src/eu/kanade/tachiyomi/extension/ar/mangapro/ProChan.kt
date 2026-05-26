@@ -110,7 +110,6 @@ class ProChan : HttpSource() {
         return chain.proceed(request)
     }
 
-    // Fixed: fetchPopularManga and fetchLatestUpdates must use getFilterList()
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 2
@@ -389,7 +388,6 @@ class ProChan : HttpSource() {
         return "$baseUrl$url"
     }
 
-    // Fixed: override fetchPageList to handle 403 during downloads
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
         return Observable.fromCallable {
             executePageListRequest(chapter, allowRetry = true)
@@ -411,7 +409,6 @@ class ProChan : HttpSource() {
                     loadUrl = getChapterUrl(chapter),
                     cookieUrl = request.url.toString(),
                     userAgent = webViewUserAgent,
-                    // No forceResolve here because the resolver checks for existing clearance
                 )
                 return executePageListRequest(chapter, allowRetry = false)
             }
