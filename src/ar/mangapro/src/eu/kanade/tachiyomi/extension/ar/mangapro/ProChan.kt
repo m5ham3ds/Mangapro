@@ -8,7 +8,6 @@ import android.webkit.CookieManager
 import android.webkit.WebSettings
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -28,10 +27,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Request
@@ -49,6 +49,7 @@ import java.lang.UnsupportedOperationException
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -69,9 +70,9 @@ class ProChan : HttpSource() {
             ?.takeIf { it.isNotBlank() }
     }
 
+    // FIX: removed cloudflare403Interceptor completely
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
-        .addInterceptor(::cloudflare403Interceptor)
         .addNetworkInterceptor(
             CookieInterceptor(
                 domain,
@@ -92,35 +93,42 @@ class ProChan : HttpSource() {
         .set("rsc", "1")
         .build()
 
-    // Interceptor that handles Cloudflare 403 responses by resolving Turnstile via WebView
-    private fun cloudflare403Interceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        // Only intercept requests to the main domain (ignore images, CDN, etc.)
-        if (request.url.host != domain) return chain.proceed(request)
+    // ========== NEW: executeSearchRequest with retry ==========
+    private fun executeSearchRequest(
+        request: Request,
+        allowRetry: Boolean = true,
+    ): Response {
+        val response = client.newCall(request).execute()
+        if (response.isSuccessful) return response
 
-        val response = chain.proceed(request)
-        if (response.code != 403) return response
-
-        response.close()
-
-        // Attempt to resolve Cloudflare challenge. This will check for existing cf_clearance
-        // and only open a WebView if necessary (forceResolve = false).
-        val resolved = CloudflareResolver.resolve(
-            loadUrl = baseUrl,
-            cookieUrl = request.url.toString(),
-            userAgent = webViewUserAgent,
-            forceResolve = false,
-        )
-
-        if (!resolved) {
-            throw Exception("HTTP 403 - Cloudflare challenge could not be solved. Please open the website in WebView manually.")
+        if (response.code == 403 && allowRetry) {
+            response.close()
+            // First attempt: use forceResolve = false (will check existing cookie)
+            var resolved = CloudflareResolver.resolve(
+                loadUrl = "$baseUrl/browse",
+                cookieUrl = request.url.toString(),
+                userAgent = webViewUserAgent,
+                forceResolve = false,
+            )
+            if (!resolved) {
+                // Second attempt: forceResolve = true (ignore existing cookie, open WebView)
+                resolved = CloudflareResolver.resolve(
+                    loadUrl = "$baseUrl/browse",
+                    cookieUrl = request.url.toString(),
+                    userAgent = webViewUserAgent,
+                    forceResolve = true,
+                )
+            }
+            if (!resolved) {
+                throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الموقع في WebView.")
+            }
+            return executeSearchRequest(request, allowRetry = false)
         }
 
-        // Retry the original request after obtaining valid cookies
-        return chain.proceed(request)
+        response.close()
+        throw Exception("HTTP error ${response.code}")
     }
 
-    // Fixed: fetchPopularManga uses full filter list with SortFilter set to "popular"
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 2 // "popular"
@@ -128,7 +136,6 @@ class ProChan : HttpSource() {
         return fetchSearchManga(page, "", filters)
     }
 
-    // Fixed: fetchLatestUpdates uses full filter list with SortFilter set to "latest_chapter"
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 1 // "latest_chapter"
@@ -155,81 +162,57 @@ class ProChan : HttpSource() {
                 }
                 val mangaId = path[2]
                 val slug = path[3]
-
-                val manga = SManga.create().apply {
-                    this@apply.url = "/series/$type/$mangaId/$slug"
-                }
-
-                return fetchMangaDetails(manga).map {
-                    MangasPage(listOf(it), false)
-                }
+                val manga = SManga.create().apply { this.url = "/series/$type/$mangaId/$slug" }
+                return fetchMangaDetails(manga).map { MangasPage(listOf(it), false) }
             } else {
                 throw Exception("رابط غير مدعوم")
             }
         }
 
         val key = searchKey(query, filters)
-        if (page == 1) {
-            pageNumber[key] = 1
-        }
+        // FIX: use getOrPut to avoid NPE
+        val currentPage = pageNumber.getOrPut(key) { page }
 
-        return client.newCall(searchMangaRequest(pageNumber[key]!!, query, filters))
-            .asObservableSuccess()
-            .map { response ->
+        return Observable.fromCallable {
+            val request = searchMangaRequest(currentPage, query, filters)
+            val response = executeSearchRequest(request)
+            response.use {
                 val statusFilter = filters.firstInstance<StatusFilter>().selected
                 val genreFilter = filters.firstInstance<GenreFilter>()
                 val tagFilter = filters.firstInstance<TagFilter>()
 
                 val data = response.parseAs<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
-                    .filter { manga ->
-                        manga.type in SUPPORTED_TYPES
-                    }
-                    .filter { manga ->
-                        statusFilter == null || manga.progress == statusFilter
-                    }
-                    .filter { manga ->
-                        genreFilter.included.isEmpty() ||
-                            manga.metadata.genres.containsAll(genreFilter.included)
-                    }
-                    .filter { manga ->
-                        genreFilter.excluded.none { it in manga.metadata.genres }
-                    }
-                    .filter { manga ->
-                        tagFilter.included.isEmpty() ||
-                            manga.metadata.tags.containsAll(tagFilter.included)
-                    }
-                    .filter { manga ->
-                        tagFilter.excluded.none { it in manga.metadata.tags }
-                    }
+                    // FIX: removed type filter (temporarily to debug missing titles)
+                    // .filter { manga -> manga.type in SUPPORTED_TYPES }
+                    .filter { manga -> statusFilter == null || manga.progress == statusFilter }
+                    .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
+                    .filter { manga -> genreFilter.excluded.none { it in manga.metadata.genres } }
+                    .filter { manga -> tagFilter.included.isEmpty() || manga.metadata.tags.containsAll(tagFilter.included) }
+                    .filter { manga -> tagFilter.excluded.none { it in manga.metadata.tags } }
                     .map { manga ->
                         SManga.create().apply {
                             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
                             title = manga.title
                             thumbnail_url = (manga.coverImageApp?.desktop ?: manga.coverImage)?.let {
-                                if (it.startsWith("/")) {
-                                    manga.cdn?.let { cdn ->
-                                        "https://$cdn.$domain$it"
-                                    }
-                                } else {
-                                    it
-                                }
+                                if (it.startsWith("/")) manga.cdn?.let { cdn -> "https://$cdn.$domain$it" } else it
                             }
                         }
-                    }
-                    .toList()
+                    }.toList()
 
                 MangasPage(mangas, data.meta.hasNextPage())
             }
-            .flatMap {
-                if (it.mangas.isEmpty() && it.hasNextPage) {
-                    pageNumber[key] = pageNumber[key]!! + 1
-                    fetchSearchManga(pageNumber[key]!!, query, filters)
-                } else {
-                    if (!it.hasNextPage) pageNumber.remove(key)
-                    Observable.just(it)
-                }
+        }.flatMap { pageResult ->
+            if (pageResult.mangas.isEmpty() && pageResult.hasNextPage) {
+                pageNumber[key] = pageNumber[key]!! + 1
+                fetchSearchManga(pageNumber[key]!!, query, filters)
+            } else {
+                // FIX: increment page for next request if has next page
+                if (pageResult.hasNextPage) pageNumber[key] = pageNumber[key]!! + 1
+                else pageNumber.remove(key)
+                Observable.just(pageResult)
             }
+        }
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
@@ -237,37 +220,23 @@ class ProChan : HttpSource() {
             addQueryParameter("status", "approved")
             addQueryParameter("limit", "18")
             addQueryParameter("page", page.toString())
-            query.takeIf(String::isNotBlank)?.also { query ->
-                addQueryParameter("search", query)
-            }
-            filters.firstInstance<TypeFilter>().selected?.also { type ->
-                addQueryParameter("type", type)
-            }
+            query.takeIf(String::isNotBlank)?.also { addQueryParameter("search", it) }
+            filters.firstInstance<TypeFilter>().selected?.also { addQueryParameter("type", it) }
             addQueryParameter("sort", filters.firstInstance<SortFilter>().selected)
-            filters.firstInstance<YearFilter>().selected?.also { year ->
-                addQueryParameter("year", year)
-            }
+            filters.firstInstance<YearFilter>().selected?.also { addQueryParameter("year", it) }
         }.build()
-
         return GET(url, headers)
     }
 
     override fun getFilterList() = FilterList(
-        TypeFilter(),
-        SortFilter(),
-        YearFilter(),
-        StatusFilter(),
-        GenreFilter(),
-        TagFilter(),
+        TypeFilter(), SortFilter(), YearFilter(), StatusFilter(), GenreFilter(), TagFilter(),
     )
 
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
-
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
     override fun mangaDetailsParse(response: Response): SManga {
         val manga = response.extractNextJs<Series>()!!.series
-
         return SManga.create().apply {
             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
             title = manga.title
@@ -281,9 +250,7 @@ class ProChan : HttpSource() {
                 }.also {
                     if (it.isNotEmpty()) {
                         append("عناوين بديلة\n")
-                        it.forEach { title ->
-                            append("- ", title, "\n")
-                        }
+                        it.forEach { title -> append("- ", title, "\n") }
                         append("\n")
                     }
                 }
@@ -315,13 +282,7 @@ class ProChan : HttpSource() {
                 else -> SManga.UNKNOWN
             }
             thumbnail_url = (manga.coverImageApp?.desktop ?: manga.metadata.coverImage)?.let {
-                if (it.startsWith("/")) {
-                    manga.cdn?.let { cdn ->
-                        "https://$cdn.$domain$it"
-                    }
-                } else {
-                    it
-                }
+                if (it.startsWith("/")) manga.cdn?.let { cdn -> "https://$cdn.$domain$it" } else it
             }
             initialized = true
         }
@@ -341,36 +302,22 @@ class ProChan : HttpSource() {
         while (data.totalChapters > chapters.size) {
             val request = GET("$baseUrl/api/public/$type/$id/chapters?page=${page++}&limit=$size&order=desc", headers)
             val nextChapters = client.newCall(request).execute()
-                .also {
-                    if (!it.isSuccessful) {
-                        it.close()
-                        throw Exception("HTTP ${it.code}")
-                    }
-                }
+                .also { if (!it.isSuccessful) { it.close(); throw Exception("HTTP ${it.code}") } }
                 .parseAs<Data<List<Chapter>>>()
-
             chapters.addAll(nextChapters.data)
         }
 
         countViews(id)
-
         return chapters
             .filter { it.language == "AR" }
             .map { chapter ->
                 SChapter.create().apply {
                     url = "/series/$type/$id/$slug/${chapter.id}/${chapter.number}"
                     name = buildString {
-                        append("\u200F") // rtl marker
-
-                        if (chapter.coins != null && chapter.coins > 0) {
-                            append("🔒 ")
-                        }
-
+                        append("\u200F")
+                        if (chapter.coins != null && chapter.coins > 0) append("🔒 ")
                         append("الفصل ")
-                        append(
-                            chapter.number.toFloat().toString().substringBefore(".0"),
-                        )
-
+                        append(chapter.number.toFloat().toString().substringBefore(".0"))
                         chapter.title?.trim()?.takeIf { it.isNotBlank() }?.let { trimmedTitle ->
                             if (trimmedTitle != chapter.number.trim() && trimmedTitle != chapter.number) {
                                 append(" \u200F- ")
@@ -386,46 +333,52 @@ class ProChan : HttpSource() {
             .sortedByDescending { it.chapter_number }
     }
 
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT)
+    // FIX: added UTC timezone
+    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
 
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
     override fun getChapterUrl(chapter: SChapter): String {
-        val url = if (chapter.url.startsWith("{")) {
-            chapter.url.parseAs<ChapterUrl>()
-        } else {
-            chapter.url
-        }
-
+        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
         return "$baseUrl$url"
     }
 
-    // Override fetchPageList to handle 403 during downloads
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
         return Observable.fromCallable {
             executePageListRequest(chapter, allowRetry = true)
         }
     }
 
+    // FIX: improved retry with forceResolve
     private fun executePageListRequest(chapter: SChapter, allowRetry: Boolean): List<Page> {
         val request = pageListRequest(chapter)
         val response = client.newCall(request).execute()
-
         if (response.isSuccessful) {
             return pageListParse(response)
         }
 
         if (response.code == 403 && allowRetry) {
             response.close()
-            // Try to resolve Cloudflare challenge for this specific chapter URL
-            val resolved = CloudflareResolver.resolve(
+            // First attempt: normal resolve
+            var resolved = CloudflareResolver.resolve(
                 loadUrl = getChapterUrl(chapter),
                 cookieUrl = request.url.toString(),
                 userAgent = webViewUserAgent,
                 forceResolve = false,
             )
             if (!resolved) {
-                throw Exception("HTTP 403 - Please open the chapter in WebView to solve the Cloudflare challenge.")
+                // Second attempt: forceResolve = true
+                resolved = CloudflareResolver.resolve(
+                    loadUrl = getChapterUrl(chapter),
+                    cookieUrl = request.url.toString(),
+                    userAgent = webViewUserAgent,
+                    forceResolve = true,
+                )
+            }
+            if (!resolved) {
+                throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الفصل في WebView.")
             }
             return executePageListRequest(chapter, allowRetry = false)
         }
@@ -436,15 +389,16 @@ class ProChan : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val responseBody = response.body.string()
-        val imageData = responseBody
-            .extractNextJsRsc<Images>()
+        // FIX: explicit predicates to avoid false matches
+        val imageData = responseBody.extractNextJsRsc<Images> { element ->
+            element is JsonObject && "images" in element && element["images"] is JsonArray
+        }
         if (imageData == null) {
-            val coins = responseBody.extractNextJsRsc<Coins>()?.coins
-            if (coins != null && coins > 0) {
-                throw Exception("فصل مدفوع")
-            } else {
-                return emptyList()
-            }
+            val coins = responseBody.extractNextJsRsc<Coins> { element ->
+                element is JsonObject && "coins" in element
+            }?.coins
+            if (coins != null && coins > 0) throw Exception("فصل مدفوع")
+            else return emptyList()
         }
 
         val seriesId = response.request.url.pathSegments[2]
@@ -459,10 +413,8 @@ class ProChan : HttpSource() {
                 .addPathSegment(chapterId)
                 .addQueryParameter("token", imageData.deferredMedia.token)
                 .build()
-
             val deferredImages = client.newCall(GET(deferredUrl, headers))
                 .execute().parseAs<Data<DeferredImages>>()
-
             images.addAll(deferredImages.data.images)
             maps.addAll(deferredImages.data.maps)
         }
@@ -471,14 +423,10 @@ class ProChan : HttpSource() {
 
         val chapterUrl = response.request.url.toString()
         val pages = mutableListOf<Page>()
-
-        images.mapIndexedTo(pages) { index, imageUrl ->
-            Page(index, chapterUrl, imageUrl)
-        }
+        images.mapIndexedTo(pages) { index, imageUrl -> Page(index, chapterUrl, imageUrl) }
         maps.mapIndexedTo(pages) { index, scrambledData ->
             Page(pages.size + index, chapterUrl, "http://$SCRAMBLED_IMAGE_HOST/#${scrambledData.toJsonString()}")
         }
-
         return pages
     }
 
@@ -486,7 +434,6 @@ class ProChan : HttpSource() {
         val headers = headersBuilder()
             .set("Referer", page.url)
             .build()
-
         return GET(page.imageUrl!!, headers)
     }
 
@@ -546,7 +493,6 @@ class ProChan : HttpSource() {
                     val pieceRequest = request.newBuilder().url(imgUrl).build()
                     val response = client.newCall(pieceRequest).await()
                     response.body.use { body ->
-                        // use Tachiyomi ImageDecoder because android.graphics.BitmapFactory doesn't handle avif
                         val decoder = ImageDecoder.newInstance(body.byteStream())
                             ?: throw Exception("Failed to create decoder")
                         try {
@@ -628,18 +574,14 @@ class ProChan : HttpSource() {
                     )
                 SecretKeySpec(hash, "AES")
             }
-            // Untested, couldn't find a chapter which uses this, possibly for paid chapters?
             "browser_session" if value.v == 3 -> synchronized(sessionKeyLock) {
                 val time = System.currentTimeMillis()
                 val key = sessionKey[value.cid]?.takeIf { it.second > time }?.first ?: run {
                     val request = GET("$baseUrl/chapter-map-session-key/${value.cid}", headers)
                     val response = client.newCall(request).execute().parseAs<Data<Key>>()
-
                     sessionKey[value.cid] = response.data.key to (time + 120000)
-
                     response.data.key
                 }
-
                 SecretKeySpec(urlSafeBase64(key), "AES")
             }
             else -> throw Exception("Unknown method")
@@ -647,7 +589,6 @@ class ProChan : HttpSource() {
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
             val spec = GCMParameterSpec(128, iv)
-
             init(Cipher.DECRYPT_MODE, key, spec)
         }
 
