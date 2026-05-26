@@ -65,6 +65,7 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 5
 
+    // إزالة علامة WebView المخفية من User-Agent
     private val webViewTokenRegex = Regex("""\;\s*wv\)""")
 
     private val webViewUserAgent: String? by lazy {
@@ -74,7 +75,7 @@ class ProChan : HttpSource() {
             ?.replace(webViewTokenRegex, ")")
     }
 
-    // FIX: removed cloudflare403Interceptor completely
+    // تم إزالة cloudflare403Interceptor completely
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -97,7 +98,7 @@ class ProChan : HttpSource() {
         .set("rsc", "1")
         .build()
 
-    // ========== NEW: executeSearchRequest with retry ==========
+    // طلب البحث مع إعادة المحاولة عند 403
     private fun executeSearchRequest(
         request: Request,
         allowRetry: Boolean = true,
@@ -107,8 +108,6 @@ class ProChan : HttpSource() {
 
         if (response.code == 403 && allowRetry) {
             response.close()
-            // Since we got a 403, the cookie is either missing or expired.
-            // Use forceResolve = true immediately to avoid double waiting.
             val resolved = CloudflareResolver.resolve(
                 loadUrl = "$baseUrl/browse",
                 cookieUrl = request.url.toString(),
@@ -116,7 +115,7 @@ class ProChan : HttpSource() {
                 forceResolve = true,
             )
             if (!resolved) {
-                throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الموقع في WebView.")
+                throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الموقع في WebView ثم المحاولة مرة أخرى.")
             }
             return executeSearchRequest(request, allowRetry = false)
         }
@@ -148,6 +147,7 @@ class ProChan : HttpSource() {
     }
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
+        // معالجة الروابط المباشرة
         if (query.startsWith("https://")) {
             val url = query.toHttpUrl()
             val path = url.pathSegments
@@ -166,7 +166,6 @@ class ProChan : HttpSource() {
         }
 
         val key = searchKey(query, filters)
-        // FIX: reset page counter on page == 1
         if (page == 1) {
             pageNumber[key] = 1
         }
@@ -182,8 +181,7 @@ class ProChan : HttpSource() {
 
                 val data = response.parseAs<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
-                    // FIX: temporarily removed type filter to debug missing titles
-                    // .filter { manga -> manga.type in SUPPORTED_TYPES }
+                    // تم إزالة فلتر النوع مؤقتاً لاكتشاف العناوين المفقودة
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
                     .filter { manga -> genreFilter.excluded.none { it in manga.metadata.genres } }
@@ -206,7 +204,6 @@ class ProChan : HttpSource() {
                 pageNumber[key] = pageNumber[key]!! + 1
                 fetchSearchManga(pageNumber[key]!!, query, filters)
             } else {
-                // FIX: increment page for next request if has next page
                 if (pageResult.hasNextPage) pageNumber[key] = pageNumber[key]!! + 1
                 else pageNumber.remove(key)
                 Observable.just(pageResult)
@@ -332,7 +329,6 @@ class ProChan : HttpSource() {
             .sortedByDescending { it.chapter_number }
     }
 
-    // FIX: added UTC timezone
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
         timeZone = TimeZone.getTimeZone("UTC")
     }
@@ -350,37 +346,50 @@ class ProChan : HttpSource() {
         }
     }
 
-    // FIX: improved retry with forceResolve = true directly
+    // معالجة قائمة الصور مع إعادة محاولة شاملة
     private fun executePageListRequest(chapter: SChapter, allowRetry: Boolean): List<Page> {
         val request = pageListRequest(chapter)
         val response = client.newCall(request).execute()
-        if (response.isSuccessful) {
-            return pageListParse(response)
-        }
 
-        if (response.code == 403 && allowRetry) {
-            response.close()
-            // Since we got a 403, the cookie is either missing or expired.
-            // Use forceResolve = true immediately.
-            val resolved = CloudflareResolver.resolve(
-                loadUrl = getChapterUrl(chapter),
-                cookieUrl = request.url.toString(),
-                userAgent = webViewUserAgent,
-                forceResolve = true,
-            )
-            if (!resolved) {
-                throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الفصل في WebView.")
+        if (!response.isSuccessful) {
+            if (response.code == 403 && allowRetry) {
+                response.close()
+                val resolved = CloudflareResolver.resolve(
+                    loadUrl = getChapterUrl(chapter),
+                    cookieUrl = request.url.toString(),
+                    userAgent = webViewUserAgent,
+                    forceResolve = true,
+                )
+                if (!resolved) {
+                    throw Exception("HTTP 403 - فشل تحميل الفصل. يرجى فتح الفصل في WebView (مرة واحدة) ثم حاول التنزيل مرة أخرى.")
+                }
+                return executePageListRequest(chapter, allowRetry = false)
             }
-            return executePageListRequest(chapter, allowRetry = false)
+            response.close()
+            throw Exception("HTTP error ${response.code}")
         }
 
-        response.close()
-        throw Exception("HTTP error ${response.code}")
+        // تحليل الصفحات مع إعادة محاولة إذا فشل الطلب المؤجل
+        return try {
+            pageListParse(response)
+        } catch (e: Exception) {
+            // إذا كان الخطأ متعلقاً بـ HTTP 403 من الـ deferred media، نحاول مرة أخرى
+            if (allowRetry && e.message?.contains("HTTP 403") == true) {
+                CloudflareResolver.resolve(
+                    loadUrl = getChapterUrl(chapter),
+                    cookieUrl = "$baseUrl/chapter-deferred-media/",
+                    userAgent = webViewUserAgent,
+                    forceResolve = true,
+                )
+                executePageListRequest(chapter, allowRetry = false)
+            } else {
+                throw e
+            }
+        }
     }
 
     override fun pageListParse(response: Response): List<Page> {
         val responseBody = response.body.string()
-        // FIX: explicit predicates to avoid false matches
         val imageData = responseBody.extractNextJsRsc<Images> { element ->
             element is JsonObject && "images" in element && element["images"] is JsonArray
         }
@@ -404,8 +413,12 @@ class ProChan : HttpSource() {
                 .addPathSegment(chapterId)
                 .addQueryParameter("token", imageData.deferredMedia.token)
                 .build()
-            val deferredImages = client.newCall(GET(deferredUrl, headers))
-                .execute().parseAs<Data<DeferredImages>>()
+            val deferredResponse = client.newCall(GET(deferredUrl, headers)).execute()
+            if (!deferredResponse.isSuccessful) {
+                deferredResponse.close()
+                throw Exception("HTTP ${deferredResponse.code} - فشل تحميل الصور المؤجلة")
+            }
+            val deferredImages = deferredResponse.parseAs<Data<DeferredImages>>()
             images.addAll(deferredImages.data.images)
             maps.addAll(deferredImages.data.maps)
         }
@@ -428,6 +441,7 @@ class ProChan : HttpSource() {
         return GET(page.imageUrl!!, headers)
     }
 
+    // باقي الدوال (scrambledImageInterceptor, decodeScrambledImageToken, countViews) لم تتغير
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url
