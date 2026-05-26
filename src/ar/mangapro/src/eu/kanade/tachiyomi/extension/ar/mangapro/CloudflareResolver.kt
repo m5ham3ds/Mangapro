@@ -21,7 +21,7 @@ object CloudflareResolver {
     private const val WEBVIEW_WIDTH = 1080
     private const val WEBVIEW_HEIGHT = 1920
     private const val CLEARANCE_COOKIE = "cf_clearance"
-    private val WEBVIEW_TOKEN_REGEX = Regex("""\;\s*wv\)""")
+    private val webViewTokenRegex = Regex("""\;\s*wv\)""")
 
     @Synchronized
     @SuppressLint("SetJavaScriptEnabled")
@@ -61,7 +61,7 @@ object CloudflareResolver {
                 mediaPlaybackRequiresUserGesture = false
                 if (!userAgent.isNullOrBlank()) userAgentString = userAgent
                 // إزالة علامة WebView المخفية التي يكتشفها Turnstile
-                userAgentString = userAgentString.replace(WEBVIEW_TOKEN_REGEX, ")")
+                userAgentString = userAgentString.replace(webViewTokenRegex, ")")
             }
 
             cookieManager.setAcceptCookie(true)
