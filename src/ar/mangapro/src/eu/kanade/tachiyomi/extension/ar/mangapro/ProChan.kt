@@ -110,11 +110,11 @@ class ProChan : HttpSource() {
         return chain.proceed(request)
     }
 
+    // Fixed: fetchPopularManga and fetchLatestUpdates must use getFilterList()
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 2
         }
-
         return fetchSearchManga(page, "", filters)
     }
 
@@ -122,7 +122,6 @@ class ProChan : HttpSource() {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 1
         }
-
         return fetchSearchManga(page, "", filters)
     }
 
@@ -388,6 +387,39 @@ class ProChan : HttpSource() {
         }
 
         return "$baseUrl$url"
+    }
+
+    // Fixed: override fetchPageList to handle 403 during downloads
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        return Observable.fromCallable {
+            executePageListRequest(chapter, allowRetry = true)
+        }
+    }
+
+    private fun executePageListRequest(chapter: SChapter, allowRetry: Boolean): List<Page> {
+        val request = pageListRequest(chapter)
+        val response = client.newCall(request).execute()
+
+        if (response.isSuccessful) {
+            return pageListParse(response)
+        }
+
+        if (response.code == 403) {
+            response.close()
+            if (allowRetry) {
+                CloudflareResolver.resolve(
+                    loadUrl = getChapterUrl(chapter),
+                    cookieUrl = request.url.toString(),
+                    userAgent = webViewUserAgent,
+                    // No forceResolve here because the resolver checks for existing clearance
+                )
+                return executePageListRequest(chapter, allowRetry = false)
+            }
+            throw Exception("HTTP 403, please open the website in WebView to solve Cloudflare challenge")
+        }
+
+        response.close()
+        throw Exception("HTTP error ${response.code}")
     }
 
     override fun pageListParse(response: Response): List<Page> {
