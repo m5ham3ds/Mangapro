@@ -65,13 +65,13 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 5
 
-    private val WEBVIEW_TOKEN_REGEX = Regex("""\;\s*wv\)""")
+    private val webViewTokenRegex = Regex("""\;\s*wv\)""")
 
     private val webViewUserAgent: String? by lazy {
         runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
-            ?.replace(WEBVIEW_TOKEN_REGEX, ")")   // إزالة ; wv)
+            ?.replace(webViewTokenRegex, ")")
     }
 
     // FIX: removed cloudflare403Interceptor completely
