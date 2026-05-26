@@ -92,34 +92,46 @@ class ProChan : HttpSource() {
         .set("rsc", "1")
         .build()
 
+    // Interceptor that handles Cloudflare 403 responses by resolving Turnstile via WebView
     private fun cloudflare403Interceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        // Ignore scrambled image requests (127.0.0.1) and CDN requests
+        // Only intercept requests to the main domain (ignore images, CDN, etc.)
         if (request.url.host != domain) return chain.proceed(request)
 
         val response = chain.proceed(request)
         if (response.code != 403) return response
 
         response.close()
-        CloudflareResolver.resolve(
+
+        // Attempt to resolve Cloudflare challenge. This will check for existing cf_clearance
+        // and only open a WebView if necessary (forceResolve = false).
+        val resolved = CloudflareResolver.resolve(
             loadUrl = baseUrl,
             cookieUrl = request.url.toString(),
             userAgent = webViewUserAgent,
-            forceResolve = true,
+            forceResolve = false,
         )
+
+        if (!resolved) {
+            throw Exception("HTTP 403 - Cloudflare challenge could not be solved. Please open the website in WebView manually.")
+        }
+
+        // Retry the original request after obtaining valid cookies
         return chain.proceed(request)
     }
 
+    // Fixed: fetchPopularManga uses full filter list with SortFilter set to "popular"
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 2
+            firstInstance<SortFilter>().state = 2 // "popular"
         }
         return fetchSearchManga(page, "", filters)
     }
 
+    // Fixed: fetchLatestUpdates uses full filter list with SortFilter set to "latest_chapter"
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 1
+            firstInstance<SortFilter>().state = 1 // "latest_chapter"
         }
         return fetchSearchManga(page, "", filters)
     }
@@ -388,6 +400,7 @@ class ProChan : HttpSource() {
         return "$baseUrl$url"
     }
 
+    // Override fetchPageList to handle 403 during downloads
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
         return Observable.fromCallable {
             executePageListRequest(chapter, allowRetry = true)
@@ -402,17 +415,19 @@ class ProChan : HttpSource() {
             return pageListParse(response)
         }
 
-        if (response.code == 403) {
+        if (response.code == 403 && allowRetry) {
             response.close()
-            if (allowRetry) {
-                CloudflareResolver.resolve(
-                    loadUrl = getChapterUrl(chapter),
-                    cookieUrl = request.url.toString(),
-                    userAgent = webViewUserAgent,
-                )
-                return executePageListRequest(chapter, allowRetry = false)
+            // Try to resolve Cloudflare challenge for this specific chapter URL
+            val resolved = CloudflareResolver.resolve(
+                loadUrl = getChapterUrl(chapter),
+                cookieUrl = request.url.toString(),
+                userAgent = webViewUserAgent,
+                forceResolve = false,
+            )
+            if (!resolved) {
+                throw Exception("HTTP 403 - Please open the chapter in WebView to solve the Cloudflare challenge.")
             }
-            throw Exception("HTTP 403, please open the website in WebView to solve Cloudflare challenge")
+            return executePageListRequest(chapter, allowRetry = false)
         }
 
         response.close()
