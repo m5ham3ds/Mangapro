@@ -71,7 +71,6 @@ class ProChan : HttpSource() {
             ?.takeIf { it.isNotBlank() }
     }
 
-    //
     // FIX: removed cloudflare403Interceptor completely
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
