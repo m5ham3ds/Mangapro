@@ -65,10 +65,13 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 5
 
+    private val WEBVIEW_TOKEN_REGEX = Regex("""\;\s*wv\)""")
+
     private val webViewUserAgent: String? by lazy {
         runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
+            ?.replace(WEBVIEW_TOKEN_REGEX, ")")   // إزالة ; wv)
     }
 
     // FIX: removed cloudflare403Interceptor completely
@@ -107,7 +110,7 @@ class ProChan : HttpSource() {
             // Since we got a 403, the cookie is either missing or expired.
             // Use forceResolve = true immediately to avoid double waiting.
             val resolved = CloudflareResolver.resolve(
-                loadUrl = "$baseUrl/browse", // or baseUrl if /browse doesn't trigger Turnstile
+                loadUrl = "$baseUrl/browse",
                 cookieUrl = request.url.toString(),
                 userAgent = webViewUserAgent,
                 forceResolve = true,
