@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -17,8 +16,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * حل Cloudflare Turnstile متعدد الاستراتيجيات.
- * لا يعتمد على Logcat — يستخدم fallback متدرج.
+ * Cloudflare Turnstile resolver with multi-strategy fallback.
  */
 object CloudflareResolver {
 
@@ -27,13 +25,9 @@ object CloudflareResolver {
     private const val WEBVIEW_WIDTH = 1080
     private const val WEBVIEW_HEIGHT = 1920
     private const val CLEARANCE_COOKIE = "cf_clearance"
-    private const val TAG = "ProChanCF"
 
-    private val webViewTokenRegex = Regex("""\;\s*wv\)""")
+    private val webViewTokenRegex = Regex(";\\s*wv\)")
 
-    /**
-     * نتيجة الحل: هل نجح + الكوكيز + أي token إضافي.
-     */
     data class ResolveResult(
         val success: Boolean,
         val clearanceCookie: String? = null,
@@ -41,10 +35,6 @@ object CloudflareResolver {
         val allCookies: String? = null,
     )
 
-    /**
-     * الحل الأساسي: انتظار cf_clearance مع User-Agent مُعدَّل.
-     * يُستخدم للبحث وقوائم Popular/Latest.
-     */
     @Synchronized
     @SuppressLint("SetJavaScriptEnabled")
     fun resolve(
@@ -57,10 +47,6 @@ object CloudflareResolver {
         return result.success
     }
 
-    /**
-     * الحل المتقدم: يستخرج كل الكوكيز + أي token من JavaScript/DOM.
-     * يُستخدم للتنزيل و chapter-map-session-key.
-     */
     @Synchronized
     @SuppressLint("SetJavaScriptEnabled")
     fun resolveWithFullExtraction(
@@ -112,7 +98,6 @@ object CloudflareResolver {
                 setSupportMultipleWindows(false)
                 javaScriptCanOpenWindowsAutomatically = false
                 loadsImagesAutomatically = true
-                // CRITICAL: إزالة ; wv) — يمنع Turnstile من كشف WebView
                 val baseUa = userAgent ?: WebSettings.getDefaultUserAgent(context)
                 userAgentString = baseUa.replace(webViewTokenRegex, ")")
             }
@@ -123,7 +108,6 @@ object CloudflareResolver {
             wv.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    // بعد تحميل الصفحة، نستخرج كل شيء من JavaScript
                     extractAllTokens(view) { tokens ->
                         if (tokens.isNotEmpty()) {
                             val clearance = tokens.find { it.startsWith("$CLEARANCE_COOKIE=") }
@@ -175,60 +159,36 @@ object CloudflareResolver {
         return result ?: ResolveResult(success = false)
     }
 
-    /**
-     * استخراج كل الكوكيز + المتغيرات من JavaScript.
-     * نبحث في: window.*, document.cookie, DOM inputs.
-     */
     private fun extractAllTokens(view: WebView?, callback: (List<String>) -> Unit) {
-        view?.evaluateJavascript(
-            """
-            (function() {
-                var results = [];
+        val js = buildString {
+            append("(function() {")
+            append("var results = [];")
+            append("try { results.push('cookies=' + document.cookie); } catch(e) {}")
+            append("var tokenKeys = ['actionToken','__cf_token','_cf_chl_opt','turnstileToken','cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq','__cf_chl_ctx','_cf_chl_enter','_cf_chl_done'];")
+            append("for (var i = 0; i < tokenKeys.length; i++) {")
+            append("try {")
+            append("var val = window[tokenKeys[i]];")
+            append("if (val && typeof val === 'string' && val.length > 8) { results.push(tokenKeys[i] + '=' + val); }")
+            append("else if (val && typeof val === 'object' && val.token) { results.push(tokenKeys[i] + '=' + String(val.token)); }")
+            append("} catch(e) {}")
+            append("}")
+            append("try {")
+            append("var inputs = document.querySelectorAll('input[type=\"hidden\"]');")
+            append("for (var j = 0; j < inputs.length; j++) {")
+            append("var name = inputs[j].name || inputs[j].id || '';")
+            append("var val = inputs[j].value;")
+            append("if (val && val.length > 10 && (name.indexOf('token') >= 0 || name.indexOf('cf') >= 0)) { results.push('input_' + name + '=' + val); }")
+            append("}")
+            append("} catch(e) {}")
+            append("try {")
+            append("var turnstile = document.querySelector('[data-turnstile-sitekey], .cf-turnstile, #turnstile');")
+            append("if (turnstile) { results.push('turnstile_present=true'); }")
+            append("} catch(e) {}")
+            append("return results.join('|||');")
+            append("})()")
+        }
 
-                // 1. document.cookie
-                try { results.push("cookies=" + document.cookie); } catch(e) {}
-
-                // 2. window token vars
-                var tokenKeys = [
-                    'actionToken','__cf_token','_cf_chl_opt','turnstileToken',
-                    'cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq',
-                    '__cf_chl_ctx','_cf_chl_enter','_cf_chl_done'
-                ];
-                for (var i = 0; i < tokenKeys.length; i++) {
-                    try {
-                        var val = window[tokenKeys[i]];
-                        if (val && typeof val === 'string' && val.length > 8) {
-                            results.push(tokenKeys[i] + '=' + val);
-                        } else if (val && typeof val === 'object' && val.token) {
-                            results.push(tokenKeys[i] + '=' + String(val.token));
-                        }
-                    } catch(e) {}
-                }
-
-                // 3. Hidden inputs
-                try {
-                    var inputs = document.querySelectorAll('input[type="hidden"]');
-                    for (var j = 0; j < inputs.length; j++) {
-                        var name = inputs[j].name || inputs[j].id || '';
-                        var val = inputs[j].value;
-                        if (val && val.length > 10 && (name.includes('token') || name.includes('cf'))) {
-                            results.push('input_' + name + '=' + val);
-                        }
-                    }
-                } catch(e) {}
-
-                // 4. Turnstile response (if rendered)
-                try {
-                    var turnstile = document.querySelector('[data-turnstile-sitekey], .cf-turnstile, #turnstile');
-                    if (turnstile) {
-                        results.push('turnstile_present=true');
-                    }
-                } catch(e) {}
-
-                return results.join('|||');
-            })()
-            """.trimIndent()
-        ) { value ->
+        view?.evaluateJavascript(js) { value ->
             val raw = value?.trim('"')?.replace("\"", """)?.takeIf { it != "null" && it != "undefined" }
             if (raw.isNullOrEmpty()) {
                 callback(emptyList())
@@ -236,7 +196,6 @@ object CloudflareResolver {
             }
 
             val tokens = raw.split("|||").filter { it.isNotBlank() }
-            // Parse cookies string into individual cookies
             val allCookies = mutableListOf<String>()
             tokens.forEach { token ->
                 when {
@@ -249,7 +208,7 @@ object CloudflareResolver {
                             }
                         }
                     }
-                    token.contains('=') -> allCookies.add(token)
+                    token.contains("=") -> allCookies.add(token)
                 }
             }
             callback(allCookies)
@@ -258,7 +217,7 @@ object CloudflareResolver {
 
     private fun extractClearance(cookies: String?): String? {
         if (cookies.isNullOrBlank()) return null
-        return cookies.split(';').map { it.trim() }
+        return cookies.split(";").map { it.trim() }
             .firstOrNull { it.startsWith("$CLEARANCE_COOKIE=") }
             ?.substringAfter("=", "")
             ?.takeIf { it.isNotBlank() }
