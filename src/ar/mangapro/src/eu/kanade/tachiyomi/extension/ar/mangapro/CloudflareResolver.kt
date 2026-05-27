@@ -189,7 +189,7 @@ object CloudflareResolver {
         }
 
         view?.evaluateJavascript(js) { value ->
-            val raw = value?.trim('"')?.replace("\"", """)?.takeIf { it != "null" && it != "undefined" }
+            val raw = value?.trim('"')?.takeIf { it != "null" && it != "undefined" }
             if (raw.isNullOrEmpty()) {
                 callback(emptyList())
                 return@evaluateJavascript
