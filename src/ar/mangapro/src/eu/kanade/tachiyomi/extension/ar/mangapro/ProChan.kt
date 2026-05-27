@@ -410,9 +410,10 @@ class ProChan : HttpSource() {
                 deferredResponse.close()
                 throw Exception("HTTP ${deferredResponse.code} - فشل تحميل الصور المؤجلة")
             }
-            val deferredImages = deferredResponse.parseAs<Data<DeferredImages>>()
-            images.addAll(deferredImages.data.images)
-            maps.addAll(deferredImages.data.maps)
+            // FIX: استخدام parseAs<DeferredImages>() مباشرة بدون Data wrapper (لـ procomic.net)
+            val deferredImages = deferredResponse.parseAs<DeferredImages>()
+            images.addAll(deferredImages.images)
+            maps.addAll(deferredImages.maps)
         }
 
         countViews(seriesId, chapterId)
@@ -594,9 +595,10 @@ class ProChan : HttpSource() {
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة. يرجى فتح الفصل في WebView أولاً.")
                     }
                     
-                    val keyData = response.parseAs<Data<Key>>()
-                    sessionKey[value.cid] = keyData.data.key to (time + 120000)
-                    keyData.data.key
+                    // FIX: استخدام parseAs<Key>() مباشرة (بدون Data wrapper) لـ procomic.net
+                    val keyData = response.parseAs<Key>()
+                    sessionKey[value.cid] = keyData.key to (time + 120000)
+                    keyData.key
                 }
                 SecretKeySpec(urlSafeBase64(key), "AES")
             }
