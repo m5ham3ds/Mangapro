@@ -1,8 +1,8 @@
 package eu.kanade.tachiyomi.extension.ar.mangapro
- 
+
 import eu.kanade.tachiyomi.source.model.Filter
 import java.util.Calendar
- 
+
 abstract class SelectFilter<T>(
     name: String,
     private val options: List<Pair<String, T>>,
@@ -12,9 +12,9 @@ abstract class SelectFilter<T>(
 ) {
     val selected get() = options[state].second
 }
- 
+
 class TriStateFilter(name: String, val value: String) : Filter.TriState(name)
- 
+
 abstract class TriStateGroupFilter(
     name: String,
     options: List<Pair<String, String>>,
@@ -25,7 +25,7 @@ abstract class TriStateGroupFilter(
     val included get() = state.filter { it.isIncluded() }.map { it.value }
     val excluded get() = state.filter { it.isExcluded() }.map { it.value }
 }
- 
+
 class TypeFilter :
     SelectFilter<String?>(
         name = "النوع",
@@ -36,7 +36,7 @@ class TypeFilter :
             "مانهوا" to "manhwa",
         ),
     )
- 
+
 class SortFilter :
     SelectFilter<String>(
         name = "الفرز",
@@ -50,7 +50,7 @@ class SortFilter :
             "أبجدي (ي-أ)" to "za",
         ),
     )
- 
+
 class StatusFilter :
     SelectFilter<String?>(
         name = "الحالة",
@@ -61,9 +61,9 @@ class StatusFilter :
             "متوقف" to "متوقف",
         ),
     )
- 
+
 private val currentYear = Calendar.getInstance()[Calendar.YEAR]
- 
+
 class YearFilter :
     SelectFilter<String?>(
         name = "السنة",
@@ -72,19 +72,19 @@ class YearFilter :
             (currentYear downTo 1970).mapTo(this) { it.toString() to it.toString() }
         },
     )
- 
+
 class GenreFilter :
     TriStateGroupFilter(
         name = "التصنيفات",
         options = genres,
     )
- 
+
 class TagFilter :
     TriStateGroupFilter(
         name = "التصنيفات الفرعية",
         options = tags,
     )
- 
+
 val genres = listOf(
     "أكشن" to "Action",
     "للكبار" to "Adult",
@@ -123,7 +123,7 @@ val genres = listOf(
     "ياوي" to "Yaoi",
     "يوري" to "Yuri",
 )
- 
+
 val tags = listOf(
     "أطفال متروكون" to "Abandoned Children",
     "سرقة القدرات" to "Ability Steal",
