@@ -265,8 +265,8 @@ private object CloudflareResolver {
             append("(function() {")
             append("var results = [];")
             append("try { results.push('cookies=' + document.cookie); } catch(e) {}")
-            append("var tokenKeys = ['actionToken','__cf_token','_cf_chl_opt','turnstileToken','cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq','__cf_chl_ctx'
-            ,'_cf_chl_enter','_cf_chl_done'];")
+            append("var tokenKeys = ['actionToken','__cf_token','_cf_chl_opt','turnstileToken','cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq','__cf_chl_ctx'];")
+            append("tokenKeys.push('_cf_chl_enter','_cf_chl_done');")
             append("for (var i = 0; i < tokenKeys.length; i++) {")
             append("try {")
             append("var val = window[tokenKeys[i]];")
