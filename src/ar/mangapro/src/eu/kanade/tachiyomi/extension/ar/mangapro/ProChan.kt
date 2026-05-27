@@ -65,7 +65,7 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 7
 
-    private val webViewTokenRegex = Regex("""\;\s*wv\)""")
+    private val webViewTokenRegex = Regex(";\\s*wv\)")
 
     private val webViewUserAgent: String? by lazy {
         runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
@@ -91,8 +91,8 @@ class ProChan : HttpSource() {
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
-        .set("Origin", baseUrl)
+        .header("Referer", "$baseUrl/")
+        .header("Origin", baseUrl)
         .apply { webViewUserAgent?.let { set("User-Agent", it) } }
 
     private val rscHeaders = headersBuilder()
@@ -100,17 +100,16 @@ class ProChan : HttpSource() {
         .build()
 
     // NEW: دالة مساعدة لبناء طلب مع token إذا وجد
-    private fun Request.withResolveResult(result: CloudflareResolver.ResolveResult?): Request {
+    private fun Request.Builder.withResolveResult(result: CloudflareResolver.ResolveResult?): Request.Builder {
         if (result == null) return this
-        val builder = newBuilder()
         result.clearanceCookie?.let {
             // CookieInterceptor سيضيف الكوكيز تلقائياً، لكن نضيفها كاحتياطي
-            builder.header("Cookie", "cf_clearance=$it")
+            header("Cookie", "cf_clearance=$it")
         }
         result.extraToken?.let {
-            builder.header("X-CF-Token", it)
+            header("X-CF-Token", it)
         }
-        return builder.build()
+        return this
     }
 
     /**
@@ -130,7 +129,7 @@ class ProChan : HttpSource() {
 
             // محاولة 1: استخدام نتيجة الحل المخزنة
             lastResolveResult?.let { cached ->
-                val retry = client.newCall(request.withResolveResult(cached)).execute()
+                val retry = client.newCall(request.newBuilder().withResolveResult(cached).build()).execute()
                 if (retry.isSuccessful) return retry
                 retry.close()
             }
@@ -150,14 +149,14 @@ class ProChan : HttpSource() {
             lastResolveResult = result
 
             // محاولة 3: إعادة الطلب مع النتيجة الجديدة
-            val retryResponse = client.newCall(request.withResolveResult(result)).execute()
+            val retryResponse = client.newCall(request.newBuilder().withResolveResult(result).build()).execute()
             if (retryResponse.isSuccessful) return retryResponse
 
             // محاولة 4: إذا فشلت، ربما يحتاج API لـ Origin/Referer مختلف
             retryResponse.close()
             val modifiedRequest = request.newBuilder()
-                .set("Referer", resolveUrl)
-                .set("Origin", baseUrl)
+                .header("Referer", resolveUrl)
+                .header("Origin", baseUrl)
                 .withResolveResult(result)
                 .build()
             return client.newCall(modifiedRequest).execute()
@@ -393,7 +392,7 @@ class ProChan : HttpSource() {
                 if (result.success) {
                     lastResolveResult = result
                     val retryResponse = client.newCall(
-                        pageListRequest(chapter).withResolveResult(result)
+                        pageListRequest(chapter).newBuilder().withResolveResult(result).build()
                     ).execute()
                     if (retryResponse.isSuccessful) {
                         return pageListParse(retryResponse)
@@ -453,7 +452,7 @@ class ProChan : HttpSource() {
 
     override fun imageRequest(page: Page): Request {
         val headers = headersBuilder()
-            .set("Referer", page.url)
+            .header("Referer", page.url)
             .build()
         return GET(page.imageUrl!!, headers)
     }
@@ -497,7 +496,7 @@ class ProChan : HttpSource() {
                         val payload = Url(url = imgUrl.toString()).toJsonString().toRequestBody(JSON_MEDIA_TYPE)
                         val signHeaders = headersBuilder()
                             .set("Sec-Fetch-Site", "same-origin")
-                            .set("Referer", chapterUrl)
+                            .header("Referer", chapterUrl)
                             .build()
                         val signRequest = POST("$baseUrl/api/cdn-image/sign", signHeaders, payload)
                         val response = client.newCall(signRequest).await()
