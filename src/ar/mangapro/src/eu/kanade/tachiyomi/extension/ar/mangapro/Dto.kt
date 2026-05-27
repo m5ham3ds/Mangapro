@@ -1,5 +1,5 @@
 package eu.kanade.tachiyomi.extension.ar.mangapro
- 
+
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -16,7 +16,7 @@ import kotlinx.serialization.json.JsonTransformingSerializer
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
- 
+
 @Serializable
 class MetaData<T>(
     val data: List<T>,
@@ -30,12 +30,12 @@ class MetaData<T>(
         fun hasNextPage() = pages > page
     }
 }
- 
+
 @Serializable
 class Data<T>(
     val data: T,
 )
- 
+
 @Serializable
 class BrowseManga(
     val id: Int,
@@ -55,12 +55,12 @@ class BrowseManga(
         val tags: Set<String> = emptySet(),
     )
 }
- 
+
 @Serializable
 class CoverImage(
     val desktop: String? = null,
 )
- 
+
 @Serializable
 class Series(
     val series: Manga,
@@ -94,7 +94,7 @@ class Series(
         )
     }
 }
- 
+
 object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSerializer(String.serializer())) {
     override fun transformDeserialize(element: JsonElement): JsonElement = when {
         element is JsonPrimitive -> {
@@ -102,19 +102,19 @@ object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSeria
                 ?.split("\n")
                 ?.map { JsonPrimitive(it.trim()) }
                 .orEmpty()
- 
+
             JsonArray(elements)
         }
         else -> element
     }
 }
- 
+
 @Serializable
 class InitialChapters(
     val initialChapters: List<Chapter>,
     val totalChapters: Int,
 )
- 
+
 @Serializable
 class Chapter(
     val id: Int,
@@ -129,27 +129,27 @@ class Chapter(
     @SerialName("created_at")
     val createdAt: String? = null,
 )
- 
+
 @Serializable
 class ChapterUrl(
     val url: String,
 )
- 
+
 @Serializable
 class Images(
     val images: List<String>,
     @Serializable(DeferredMediaSerializer::class)
     val deferredMedia: DeferredMediaToken? = null,
 )
- 
+
 @Serializable
 class DeferredMediaToken(
     val token: String,
 )
- 
+
 object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
     override val descriptor = DeferredMediaToken.serializer().descriptor
- 
+
     override fun deserialize(decoder: Decoder): DeferredMediaToken? {
         val jsonDecoder = decoder as JsonDecoder
         val element = jsonDecoder.decodeJsonElement()
@@ -158,7 +158,7 @@ object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
             else -> jsonDecoder.json.decodeFromJsonElement(DeferredMediaToken.serializer(), element)
         }
     }
- 
+
     override fun serialize(encoder: Encoder, value: DeferredMediaToken?) {
         if (value == null) {
             encoder.encodeNull()
@@ -167,17 +167,17 @@ object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
         }
     }
 }
- 
+
 @Serializable
 class DeferredImages(
     val images: List<String>,
     @Serializable(ScrambledDataSerializer::class)
     val maps: List<ScrambledData>,
 )
- 
+
 @Serializable
 sealed class ScrambledData
- 
+
 @Serializable
 @SerialName("direct")
 class ScrambledImage(
@@ -186,14 +186,14 @@ class ScrambledImage(
     val pieces: List<String>,
     val dim: List<Int>,
 ) : ScrambledData()
- 
+
 @Serializable
 @SerialName("indirect")
 class ScrambledImageToken(
     val token: String,
     val method: String,
 ) : ScrambledData()
- 
+
 object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>(ListSerializer(ScrambledData.serializer())) {
     override fun transformDeserialize(element: JsonElement): JsonElement = JsonArray(
         element.jsonArray.map { jsonElement ->
@@ -202,7 +202,7 @@ object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>
                 "method" in jsonObject -> JsonObject(
                     jsonObject + ("type" to JsonPrimitive("indirect")),
                 )
- 
+
                 else -> JsonObject(
                     jsonObject + ("type" to JsonPrimitive("direct")),
                 )
@@ -210,7 +210,7 @@ object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>
         },
     )
 }
- 
+
 @Serializable
 class ScrambledImageTokenValue(
     val cid: Int,
@@ -220,28 +220,28 @@ class ScrambledImageTokenValue(
     val tag: String,
     val v: Int,
 )
- 
+
 @Serializable
 class Key(
     val key: String,
 )
- 
+
 @Serializable
 class Coins(
     val coins: Int,
 )
- 
+
 @Serializable
 class Url(
     val url: String,
 )
- 
+
 @Serializable
 class Token(
     val token: String,
     val expires: Long,
 )
- 
+
 @Serializable
 class ViewsDto(
     val chapterId: Int? = null,
