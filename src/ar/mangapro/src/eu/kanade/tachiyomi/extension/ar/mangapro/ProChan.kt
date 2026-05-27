@@ -65,7 +65,7 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 7
 
-    private val webViewTokenRegex = Regex(";\\s*wv\)")
+    private val webViewTokenRegex = Regex(""";\s*wv)""")
 
     private val webViewUserAgent: String? by lazy {
         runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
@@ -91,8 +91,8 @@ class ProChan : HttpSource() {
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
-        .header("Referer", "$baseUrl/")
-        .header("Origin", baseUrl)
+        .set("Referer", "$baseUrl/")
+        .set("Origin", baseUrl)
         .apply { webViewUserAgent?.let { set("User-Agent", it) } }
 
     private val rscHeaders = headersBuilder()
@@ -452,7 +452,7 @@ class ProChan : HttpSource() {
 
     override fun imageRequest(page: Page): Request {
         val headers = headersBuilder()
-            .header("Referer", page.url)
+            .set("Referer", page.url)
             .build()
         return GET(page.imageUrl!!, headers)
     }
@@ -496,7 +496,7 @@ class ProChan : HttpSource() {
                         val payload = Url(url = imgUrl.toString()).toJsonString().toRequestBody(JSON_MEDIA_TYPE)
                         val signHeaders = headersBuilder()
                             .set("Sec-Fetch-Site", "same-origin")
-                            .header("Referer", chapterUrl)
+                            .set("Referer", chapterUrl)
                             .build()
                         val signRequest = POST("$baseUrl/api/cdn-image/sign", signHeaders, payload)
                         val response = client.newCall(signRequest).await()
