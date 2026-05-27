@@ -65,7 +65,7 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 7
 
-    private val webViewTokenRegex = Regex(""";\s*wv)""")
+    private val webViewTokenRegex = Regex(";\\s*wv\)")
 
     private val webViewUserAgent: String? by lazy {
         runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
@@ -100,16 +100,17 @@ class ProChan : HttpSource() {
         .build()
 
     // NEW: دالة مساعدة لبناء طلب مع token إذا وجد
-    private fun Request.Builder.withResolveResult(result: CloudflareResolver.ResolveResult?): Request.Builder {
+    private fun Request.withResolveResult(result: CloudflareResolver.ResolveResult?): Request {
         if (result == null) return this
+        val builder = newBuilder()
         result.clearanceCookie?.let {
             // CookieInterceptor سيضيف الكوكيز تلقائياً، لكن نضيفها كاحتياطي
-            header("Cookie", "cf_clearance=$it")
+            builder.header("Cookie", "cf_clearance=$it")
         }
         result.extraToken?.let {
-            header("X-CF-Token", it)
+            builder.header("X-CF-Token", it)
         }
-        return this
+        return builder.build()
     }
 
     /**
@@ -129,7 +130,7 @@ class ProChan : HttpSource() {
 
             // محاولة 1: استخدام نتيجة الحل المخزنة
             lastResolveResult?.let { cached ->
-                val retry = client.newCall(request.newBuilder().withResolveResult(cached).build()).execute()
+                val retry = client.newCall(request.withResolveResult(cached)).execute()
                 if (retry.isSuccessful) return retry
                 retry.close()
             }
@@ -149,14 +150,14 @@ class ProChan : HttpSource() {
             lastResolveResult = result
 
             // محاولة 3: إعادة الطلب مع النتيجة الجديدة
-            val retryResponse = client.newCall(request.newBuilder().withResolveResult(result).build()).execute()
+            val retryResponse = client.newCall(request.withResolveResult(result)).execute()
             if (retryResponse.isSuccessful) return retryResponse
 
             // محاولة 4: إذا فشلت، ربما يحتاج API لـ Origin/Referer مختلف
             retryResponse.close()
             val modifiedRequest = request.newBuilder()
-                .header("Referer", resolveUrl)
-                .header("Origin", baseUrl)
+                .set("Referer", resolveUrl)
+                .set("Origin", baseUrl)
                 .withResolveResult(result)
                 .build()
             return client.newCall(modifiedRequest).execute()
@@ -392,7 +393,7 @@ class ProChan : HttpSource() {
                 if (result.success) {
                     lastResolveResult = result
                     val retryResponse = client.newCall(
-                        pageListRequest(chapter).newBuilder().withResolveResult(result).build()
+                        pageListRequest(chapter).withResolveResult(result)
                     ).execute()
                     if (retryResponse.isSuccessful) {
                         return pageListParse(retryResponse)
