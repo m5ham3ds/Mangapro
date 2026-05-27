@@ -265,7 +265,8 @@ private object CloudflareResolver {
             append("(function() {")
             append("var results = [];")
             append("try { results.push('cookies=' + document.cookie); } catch(e) {}")
-            append("var tokenKeys = ['actionToken','__cf_token','_cf_chl_opt','turnstileToken','cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq','__cf_chl_ctx','_cf_chl_enter','_cf_chl_done'];")
+            append("var tokenKeys = ['actionToken','__cf_token','_cf_chl_opt','turnstileToken','cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq','__cf_chl_ctx'
+            ,'_cf_chl_enter','_cf_chl_done'];")
             append("for (var i = 0; i < tokenKeys.length; i++) {")
             append("try {")
             append("var val = window[tokenKeys[i]];")
@@ -521,20 +522,15 @@ class ProChan : HttpSource() {
             artist = manga.metadata.artist.joinToString()
             author = manga.metadata.author.joinToString()
             description = buildString {
-                manga.description?.also { append(it.trim(), "
-
-") }
+                manga.description?.also { append(it.trim(), "\n\n") }
                 buildList {
                     addAll(manga.metadata.altTitles)
                     manga.metadata.originalTitle?.also { add(it) }
                 }.also {
                     if (it.isNotEmpty()) {
-                        append("عناوين بديلة
-")
-                        it.forEach { title -> append("- ", title, "
-") }
-                        append("
-")
+                        append("عناوين بديلة\n")
+                        it.forEach { title -> append("- ", title, "\n") }
+                        append("\n")
                     }
                 }
             }.trim()
@@ -597,18 +593,18 @@ class ProChan : HttpSource() {
                 SChapter.create().apply {
                     url = "/series/$type/$id/$slug/${chapter.id}/${chapter.number}"
                     name = buildString {
-                        append("‏")
+                        append("\u200F")
                         if (chapter.coins != null && chapter.coins > 0) append("🔒 ")
                         append("الفصل ")
                         append(chapter.number.toFloat().toString().substringBefore(".0"))
                         chapter.title?.trim()?.takeIf { it.isNotBlank() }?.let { trimmedTitle ->
                             if (trimmedTitle != chapter.number.trim() && trimmedTitle != chapter.number) {
-                                append(" ‏- ")
+                                append(" \u200F- ")
                                 append(trimmedTitle)
                             }
                         }
                     }
-                    scanlator = chapter.uploader ?: "​"
+                    scanlator = chapter.uploader ?: "\u200B"
                     chapter_number = chapter.number.toFloat()
                     date_upload = dateFormat.tryParse(chapter.createdAt)
                 }
