@@ -26,7 +26,7 @@ object CloudflareResolver {
     private const val WEBVIEW_HEIGHT = 1920
     private const val CLEARANCE_COOKIE = "cf_clearance"
 
-    private val webViewTokenRegex = Regex(";\\s*wv\)")
+    private val webViewTokenRegex = Regex(""";\s*wv)""")
 
     data class ResolveResult(
         val success: Boolean,
