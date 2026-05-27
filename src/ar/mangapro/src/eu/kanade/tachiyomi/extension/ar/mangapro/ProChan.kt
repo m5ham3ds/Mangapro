@@ -64,7 +64,6 @@ import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlin.io.encoding.Base64
 
 // ============================================================
 // CLOUDFLARE RESOLVER - INNER OBJECT (no external file needed)
@@ -342,7 +341,7 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 8
 
-    private val webViewTokenRegex = Regex(";\\s*wv)")
+    private val webViewTokenRegex = Regex("""\;\s*wv\)""")
 
     private val webViewUserAgent: String? by lazy {
         runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
@@ -749,7 +748,7 @@ class ProChan : HttpSource() {
         val orderedPieces = scrambledImage.order.map { scrambledImage.pieces[it] }
         val pieceBitmaps = runBlocking {
             orderedPieces.map { pieceUrl ->
-                async(Dispatchers.IO.limitedParallelism(2)) {
+                async(Dispatchers.IO) {
                     var imgUrl = if (pieceUrl.startsWith("/")) {
                         "https://$cdn.$domain$pieceUrl"
                     } else {
@@ -891,9 +890,9 @@ class ProChan : HttpSource() {
         return String(decryptedBytes, Charsets.UTF_8).parseAs()
     }
 
-    private fun urlSafeBase64(data: String) = Base64.UrlSafe
-        .withPadding(Base64.PaddingOption.PRESENT_OPTIONAL)
-        .decode(data)
+    private fun urlSafeBase64(data: String): ByteArray {
+        return android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
+    }
 
     private fun countViews(seriesId: String, chapterId: String? = null) {
         val userAgent = headers["User-Agent"]!!
