@@ -65,7 +65,6 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 5
 
-    // إزالة علامة WebView المخفية من User-Agent
     private val webViewTokenRegex = Regex("""\;\s*wv\)""")
 
     private val webViewUserAgent: String? by lazy {
@@ -75,7 +74,7 @@ class ProChan : HttpSource() {
             ?.replace(webViewTokenRegex, ")")
     }
 
-    // تم إزالة cloudflare403Interceptor completely
+    // تم إزالة cloudflare403Interceptor
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -98,7 +97,7 @@ class ProChan : HttpSource() {
         .set("rsc", "1")
         .build()
 
-    // طلب البحث مع إعادة المحاولة عند 403
+    // طلب البحث مع retry
     private fun executeSearchRequest(
         request: Request,
         allowRetry: Boolean = true,
@@ -115,7 +114,7 @@ class ProChan : HttpSource() {
                 forceResolve = true,
             )
             if (!resolved) {
-                throw Exception("HTTP 403 - فشل حل تحدي Cloudflare. يرجى فتح الموقع في WebView ثم المحاولة مرة أخرى.")
+                throw Exception("HTTP 403 - فشل حل Cloudflare. يرجى فتح الموقع في WebView ثم المحاولة مرة أخرى.")
             }
             return executeSearchRequest(request, allowRetry = false)
         }
@@ -126,14 +125,14 @@ class ProChan : HttpSource() {
 
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 2 // "popular"
+            firstInstance<SortFilter>().state = 2
         }
         return fetchSearchManga(page, "", filters)
     }
 
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 1 // "latest_chapter"
+            firstInstance<SortFilter>().state = 1
         }
         return fetchSearchManga(page, "", filters)
     }
@@ -147,15 +146,12 @@ class ProChan : HttpSource() {
     }
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        // معالجة الروابط المباشرة
         if (query.startsWith("https://")) {
             val url = query.toHttpUrl()
             val path = url.pathSegments
             if (url.host == domain && path.size >= 4 && path[0] == "series") {
                 val type = path[1]
-                if (type !in SUPPORTED_TYPES) {
-                    throw Exception("نوع غير مدعوم")
-                }
+                if (type !in SUPPORTED_TYPES) throw Exception("نوع غير مدعوم")
                 val mangaId = path[2]
                 val slug = path[3]
                 val manga = SManga.create().apply { this.url = "/series/$type/$mangaId/$slug" }
@@ -181,7 +177,6 @@ class ProChan : HttpSource() {
 
                 val data = response.parseAs<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
-                    // تم إزالة فلتر النوع مؤقتاً لاكتشاف العناوين المفقودة
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
                     .filter { manga -> genreFilter.excluded.none { it in manga.metadata.genres } }
@@ -346,10 +341,9 @@ class ProChan : HttpSource() {
         }
     }
 
-    // معالجة قائمة الصور مع إعادة محاولة شاملة
     private fun executePageListRequest(chapter: SChapter, allowRetry: Boolean): List<Page> {
         val request = pageListRequest(chapter)
-        val response = client.newCall(request).execute()
+        var response = client.newCall(request).execute()
 
         if (!response.isSuccessful) {
             if (response.code == 403 && allowRetry) {
@@ -361,7 +355,7 @@ class ProChan : HttpSource() {
                     forceResolve = true,
                 )
                 if (!resolved) {
-                    throw Exception("HTTP 403 - فشل تحميل الفصل. يرجى فتح الفصل في WebView (مرة واحدة) ثم حاول التنزيل مرة أخرى.")
+                    throw Exception("HTTP 403 - يرجى فتح الفصل في WebView أولاً، ثم حاول التنزيل مرة أخرى.")
                 }
                 return executePageListRequest(chapter, allowRetry = false)
             }
@@ -369,11 +363,9 @@ class ProChan : HttpSource() {
             throw Exception("HTTP error ${response.code}")
         }
 
-        // تحليل الصفحات مع إعادة محاولة إذا فشل الطلب المؤجل
         return try {
             pageListParse(response)
         } catch (e: Exception) {
-            // إذا كان الخطأ متعلقاً بـ HTTP 403 من الـ deferred media، نحاول مرة أخرى
             if (allowRetry && e.message?.contains("HTTP 403") == true) {
                 CloudflareResolver.resolve(
                     loadUrl = getChapterUrl(chapter),
@@ -441,7 +433,6 @@ class ProChan : HttpSource() {
         return GET(page.imageUrl!!, headers)
     }
 
-    // باقي الدوال (scrambledImageInterceptor, decodeScrambledImageToken, countViews) لم تتغير
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url
@@ -583,9 +574,29 @@ class ProChan : HttpSource() {
                 val time = System.currentTimeMillis()
                 val key = sessionKey[value.cid]?.takeIf { it.second > time }?.first ?: run {
                     val request = GET("$baseUrl/chapter-map-session-key/${value.cid}", headers)
-                    val response = client.newCall(request).execute().parseAs<Data<Key>>()
-                    sessionKey[value.cid] = response.data.key to (time + 120000)
-                    response.data.key
+                    var response = client.newCall(request).execute()
+                    
+                    // إعادة المحاولة عند 403
+                    if (response.code == 403) {
+                        response.close()
+                        CloudflareResolver.resolve(
+                            loadUrl = "$baseUrl/chapter-map-session-key/${value.cid}",
+                            cookieUrl = request.url.toString(),
+                            userAgent = webViewUserAgent,
+                            forceResolve = true,
+                        )
+                        response = client.newCall(request).execute()
+                    }
+                    
+                    if (!response.isSuccessful) {
+                        val code = response.code
+                        response.close()
+                        throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة. يرجى فتح الفصل في WebView أولاً.")
+                    }
+                    
+                    val keyData = response.parseAs<Data<Key>>()
+                    sessionKey[value.cid] = keyData.data.key to (time + 120000)
+                    keyData.data.key
                 }
                 SecretKeySpec(urlSafeBase64(key), "AES")
             }
