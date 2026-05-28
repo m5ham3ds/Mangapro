@@ -38,7 +38,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.internal.closeQuietly
 import okio.Buffer
-import okio.ByteString.Companion.decodeBase64
+import okio.decodeBase64
 import okio.IOException
 import rx.Observable
 import tachiyomi.decoder.ImageDecoder
@@ -82,14 +82,14 @@ class ProChan : HttpSource() {
 
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 2
+            firstInstance<<SortFilter>().state = 2
         }
         return fetchSearchManga(page, "", filters)
     }
 
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 1
+            firstInstance<<SortFilter>().state = 1
         }
         return fetchSearchManga(page, "", filters)
     }
@@ -116,11 +116,11 @@ class ProChan : HttpSource() {
             response.use {
                 if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
 
-                val statusFilter = filters.firstInstance<StatusFilter>().selected
-                val genreFilter = filters.firstInstance<GenreFilter>()
+                val statusFilter = filters.firstInstance<<StatusFilter>().selected
+                val genreFilter = filters.firstInstance<<GenreFilter>()
                 val tagFilter = filters.firstInstance<TagFilter>()
 
-                val data = response.parseAs<MetaData<BrowseManga>>()
+                val data = response.parseAs<<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
@@ -149,8 +149,8 @@ class ProChan : HttpSource() {
             addQueryParameter("page", page.toString())
             query.takeIf(String::isNotBlank)?.also { addQueryParameter("search", it) }
             filters.firstInstance<TypeFilter>().selected?.also { addQueryParameter("type", it) }
-            addQueryParameter("sort", filters.firstInstance<SortFilter>().selected)
-            filters.firstInstance<YearFilter>().selected?.also { addQueryParameter("year", it) }
+            addQueryParameter("sort", filters.firstInstance<<SortFilter>().selected)
+            filters.firstInstance<<YearFilter>().selected?.also { addQueryParameter("year", it) }
         }.build()
         return GET(url, headers)
     }
@@ -163,7 +163,7 @@ class ProChan : HttpSource() {
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val manga = response.extractNextJs<Series>()!!.series
+        val manga = response.extractNextJs<<Series>()!!.series
         return SManga.create().apply {
             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
             title = manga.title
@@ -218,7 +218,7 @@ class ProChan : HttpSource() {
     override fun chapterListRequest(manga: SManga) = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.extractNextJs<InitialChapters>()!!
+        val data = response.extractNextJs<<InitialChapters>()!!
         val chapters = data.initialChapters.toMutableList()
         val size = chapters.size
         var page = 2
@@ -230,7 +230,7 @@ class ProChan : HttpSource() {
             val request = GET("$baseUrl/api/public/$type/$id/chapters?page=${page++}&limit=$size&order=desc", headers)
             val nextChapters = client.newCall(request).execute()
                 .also { if (!it.isSuccessful) { it.close(); throw Exception("HTTP ${it.code}") } }
-                .parseAs<Data<List<Chapter>>>()
+                .parseAs<Data<List<<Chapter>>>()
             chapters.addAll(nextChapters.data)
         }
 
@@ -267,11 +267,11 @@ class ProChan : HttpSource() {
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
     override fun getChapterUrl(chapter: SChapter): String {
-        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
+        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<<ChapterUrl>() else chapter.url
         return "$baseUrl$url"
     }
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override fun fetchPageList(chapter: SChapter): Observable<List<<Page>> {
         return Observable.fromCallable {
             val request = pageListRequest(chapter)
             val response = client.newCall(request).execute()
@@ -283,9 +283,9 @@ class ProChan : HttpSource() {
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
+    override fun pageListParse(response: Response): List<<Page> {
         val responseBody = response.body.string()
-        val imageData = responseBody.extractNextJsRsc<Images> { element ->
+        val imageData = responseBody.extractNextJsRsc<<Images> { element ->
             element is JsonObject && "images" in element && element["images"] is JsonArray
         }
         if (imageData == null) {
@@ -300,7 +300,7 @@ class ProChan : HttpSource() {
         val chapterId = response.request.url.pathSegments[4]
 
         val images = imageData.images.toMutableList()
-        val maps = mutableListOf<ScrambledData>()
+        val maps = mutableListOf<<ScrambledData>()
 
         if (imageData.deferredMedia != null) {
             val deferredUrl = baseUrl.toHttpUrl().newBuilder()
@@ -316,7 +316,7 @@ class ProChan : HttpSource() {
                 deferredResponse.close()
                 throw Exception("HTTP ${deferredResponse.code} - فشل تحميل الصور المؤجلة")
             }
-            val deferredImages = deferredResponse.parseAs<Data<DeferredImages>>()
+            val deferredImages = deferredResponse.parseAs<Data<<DeferredImages>>()
             images.addAll(deferredImages.data.images)
             maps.addAll(deferredImages.data.maps)
         }
@@ -324,7 +324,7 @@ class ProChan : HttpSource() {
         countViews(seriesId, chapterId)
 
         val chapterUrl = response.request.url.toString()
-        val pages = mutableListOf<Page>()
+        val pages = mutableListOf<<Page>()
         images.mapIndexedTo(pages) { index, imageUrl -> Page(index, chapterUrl, imageUrl) }
         maps.mapIndexedTo(pages) { index, scrambledData ->
             Page(pages.size + index, chapterUrl, "http://$SCRAMBLED_IMAGE_HOST/#${scrambledData.toJsonString()}")
@@ -353,7 +353,7 @@ class ProChan : HttpSource() {
             else -> "cdn3"
         }
 
-        val scrambledImage = when (val scrambledData = url.fragment!!.parseAs<ScrambledData>()) {
+        val scrambledImage = when (val scrambledData = url.fragment!!.parseAs<<ScrambledData>()) {
             is ScrambledImage -> scrambledData
             is ScrambledImageToken -> decodeScrambledImageToken(scrambledData)
         }
@@ -383,7 +383,7 @@ class ProChan : HttpSource() {
                         val signRequest = POST("$baseUrl/api/cdn-image/sign", signHeaders, payload)
                         val response = client.newCall(signRequest).await()
                         if (response.isSuccessful) {
-                            val token = response.parseAs<Token>()
+                            val token = response.parseAs<<Token>()
                             imgUrl = imgUrl.newBuilder()
                                 .setQueryParameter("token", token.token)
                                 .setQueryParameter("expires", token.expires.toString())
@@ -461,7 +461,7 @@ class ProChan : HttpSource() {
 
     private fun decodeScrambledImageToken(data: ScrambledImageToken): ScrambledImage {
         val value = String(urlSafeBase64(data.token), Charsets.UTF_8)
-            .parseAs<ScrambledImageTokenValue>()
+            .parseAs<<ScrambledImageTokenValue>()
 
         val iv = urlSafeBase64(value.iv)
         val tag = urlSafeBase64(value.tag)
@@ -508,7 +508,7 @@ class ProChan : HttpSource() {
     }
 
     private fun urlSafeBase64(data: String): ByteArray {
-        return decodeBase64(data)?.toByteArray()
+        return data.decodeBase64()?.toByteArray()
             ?: throw IllegalArgumentException("Invalid base64: $data")
     }
 
