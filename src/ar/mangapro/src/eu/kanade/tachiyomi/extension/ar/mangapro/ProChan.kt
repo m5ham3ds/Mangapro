@@ -1,18 +1,5 @@
 package eu.kanade.tachiyomi.extension.ar.mangapro
 
-import android.annotation.SuppressLint
-import android.app.Application
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.os.Handler
-import android.os.Looper
-import android.util.Log
-import android.view.View
-import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.await
@@ -48,10 +35,9 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.internal.closeQuietly
 import okio.Buffer
+import okio.ByteString.Companion.decodeBase64
 import rx.Observable
 import tachiyomi.decoder.ImageDecoder
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.io.IOException
 import java.lang.UnsupportedOperationException
 import java.security.MessageDigest
@@ -59,300 +45,19 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-// ============================================================
-// CLOUDFLARE RESOLVER - INNER OBJECT (no external file needed)
-// ============================================================
-private object CloudflareResolver {
-
-    private const val TIMEOUT_SECONDS = 45L
-    private const val POLL_INTERVAL_MS = 500L
-    private const val WEBVIEW_WIDTH = 1080
-    private const val WEBVIEW_HEIGHT = 1920
-    private const val CLEARANCE_COOKIE = "cf_clearance"
-
-    data class ResolveResult(
-        val success: Boolean,
-        val clearanceCookie: String? = null,
-        val extraToken: String? = null,
-        val allCookies: String? = null,
-    )
-
-    @Synchronized
-    @SuppressLint("SetJavaScriptEnabled")
-    fun resolve(
-        loadUrl: String,
-        cookieUrl: String = loadUrl,
-        userAgent: String? = null,
-        forceResolve: Boolean = false,
-    ): Boolean {
-        val cookieManager = CookieManager.getInstance()
-        if (!forceResolve && hasClearance(cookieManager, cookieUrl)) return true
-
-        val context = Injekt.get<Application>()
-        val handler = Handler(Looper.getMainLooper())
-        val latch = CountDownLatch(1)
-        var webView: WebView? = null
-        lateinit var poll: Runnable
-
-        handler.post {
-            val wv = WebView(context)
-            webView = wv
-
-            wv.layoutParams = ViewGroup.LayoutParams(WEBVIEW_WIDTH, WEBVIEW_HEIGHT)
-            wv.measure(
-                View.MeasureSpec.makeMeasureSpec(WEBVIEW_WIDTH, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(WEBVIEW_HEIGHT, View.MeasureSpec.EXACTLY),
-            )
-            wv.layout(0, 0, WEBVIEW_WIDTH, WEBVIEW_HEIGHT)
-
-            with(wv.settings) {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                blockNetworkImage = false
-                mediaPlaybackRequiresUserGesture = false
-                if (!userAgent.isNullOrBlank()) userAgentString = userAgent
-            }
-
-            cookieManager.setAcceptCookie(true)
-            cookieManager.setAcceptThirdPartyCookies(wv, true)
-
-            wv.webViewClient = WebViewClient()
-
-            poll = Runnable {
-                if (latch.count == 0L) return@Runnable
-                if (hasClearance(cookieManager, cookieUrl)) {
-                    latch.countDown()
-                } else {
-                    handler.postDelayed(poll, POLL_INTERVAL_MS)
-                }
-            }
-
-            wv.loadUrl(loadUrl)
-            handler.postDelayed(poll, POLL_INTERVAL_MS)
-        }
-
-        latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-
-        handler.post {
-            handler.removeCallbacks(poll)
-            webView?.stopLoading()
-            webView?.destroy()
-        }
-
-        return hasClearance(cookieManager, cookieUrl)
-    }
-
-    @Synchronized
-    @SuppressLint("SetJavaScriptEnabled")
-    fun resolveWithFullExtraction(
-        loadUrl: String,
-        cookieUrl: String = loadUrl,
-        userAgent: String? = null,
-        forceResolve: Boolean = false,
-    ): ResolveResult {
-        val cookieManager = CookieManager.getInstance()
-        val existingCookies = cookieManager.getCookie(cookieUrl)
-
-        if (!forceResolve) {
-            val clearance = extractClearance(existingCookies)
-            if (clearance != null) {
-                return ResolveResult(
-                    success = true,
-                    clearanceCookie = clearance,
-                    allCookies = existingCookies,
-                )
-            }
-        }
-
-        val context = Injekt.get<Application>()
-        val handler = Handler(Looper.getMainLooper())
-        val latch = CountDownLatch(1)
-        var webView: WebView? = null
-        var result: ResolveResult? = null
-        lateinit var poll: Runnable
-
-        handler.post {
-            val wv = WebView(context)
-            webView = wv
-
-            wv.layoutParams = ViewGroup.LayoutParams(WEBVIEW_WIDTH, WEBVIEW_HEIGHT)
-            wv.measure(
-                View.MeasureSpec.makeMeasureSpec(WEBVIEW_WIDTH, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(WEBVIEW_HEIGHT, View.MeasureSpec.EXACTLY),
-            )
-            wv.layout(0, 0, WEBVIEW_WIDTH, WEBVIEW_HEIGHT)
-
-            with(wv.settings) {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                blockNetworkImage = false
-                mediaPlaybackRequiresUserGesture = false
-                if (!userAgent.isNullOrBlank()) userAgentString = userAgent
-            }
-
-            cookieManager.setAcceptCookie(true)
-            cookieManager.setAcceptThirdPartyCookies(wv, true)
-
-            wv.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    extractAllTokens(view) { tokens ->
-                        if (tokens.isNotEmpty()) {
-                            val clearance = tokens.find { it.startsWith("$CLEARANCE_COOKIE=") }
-                                ?.substringAfter("=", "")
-                            val extra = tokens.find { !it.startsWith("$CLEARANCE_COOKIE=") }
-                                ?.substringAfter("=", "")
-                            result = ResolveResult(
-                                success = clearance != null || extra != null,
-                                clearanceCookie = clearance,
-                                extraToken = extra,
-                                allCookies = tokens.joinToString("; "),
-                            )
-                            if (result?.success == true) {
-                                latch.countDown()
-                            }
-                        }
-                    }
-                }
-            }
-
-            poll = Runnable {
-                if (latch.count == 0L) return@Runnable
-                val currentCookies = cookieManager.getCookie(cookieUrl)
-                val clearance = extractClearance(currentCookies)
-                if (clearance != null) {
-                    result = ResolveResult(
-                        success = true,
-                        clearanceCookie = clearance,
-                        allCookies = currentCookies,
-                    )
-                    latch.countDown()
-                } else {
-                    handler.postDelayed(poll, POLL_INTERVAL_MS)
-                }
-            }
-
-            wv.loadUrl(loadUrl)
-            handler.postDelayed(poll, POLL_INTERVAL_MS)
-        }
-
-        latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-
-        handler.post {
-            handler.removeCallbacks(poll)
-            webView?.stopLoading()
-            webView?.destroy()
-        }
-
-        return result ?: ResolveResult(success = false)
-    }
-
-    private fun extractAllTokens(view: WebView?, callback: (List<String>) -> Unit) {
-        val js = buildString {
-            append("""(function() {""")
-            append("""var results = [];""")
-            append("""try { results.push('cookies=' + document.cookie); } catch(e) {}""")
-            append("""var tokenKeys = ['actionToken','__cf_token','_cf_chl_opt','turnstileToken','cf_token','__turnstileToken','__cf_chl_token','cf_chl_seq','__cf_chl_ctx'];""")
-            append("""tokenKeys.push('_cf_chl_enter','_cf_chl_done');""")
-            append("""for (var i = 0; i < tokenKeys.length; i++) {""")
-            append("""try {""")
-            append("""var val = window[tokenKeys[i]];""")
-            append("""if (val && typeof val === 'string' && val.length > 8) { results.push(tokenKeys[i] + '=' + val); }""")
-            append("""else if (val && typeof val === 'object' && val.token) { results.push(tokenKeys[i] + '=' + String(val.token)); }""")
-            append("""} catch(e) {}""")
-            append("""}""")
-            append("""try {""")
-            append("""var inputs = document.querySelectorAll('input[type="hidden"]');""")
-            append("""for (var j = 0; j < inputs.length; j++) {""")
-            append("""var name = inputs[j].name || inputs[j].id || '';""")
-            append("""var val = inputs[j].value;""")
-            append("""if (val && val.length > 10 && (name.indexOf('token') >= 0 || name.indexOf('cf') >= 0)) { results.push('input_' + name + '=' + val); }""")
-            append("""}""")
-            append("""} catch(e) {}""")
-            append("""try {""")
-            append("""var turnstile = document.querySelector('[data-turnstile-sitekey], .cf-turnstile, #turnstile');""")
-            append("""if (turnstile) { results.push('turnstile_present=true'); }""")
-            append("""} catch(e) {}""")
-            append("""return results.join('|||');""")
-            append("""})()""")
-        }
-
-        view?.evaluateJavascript(js) { value ->
-            val raw = value?.trim('"')?.takeIf { it != "null" && it != "undefined" }
-            if (raw.isNullOrEmpty()) {
-                callback(emptyList())
-                return@evaluateJavascript
-            }
-
-            val tokens = raw.split("|||").filter { it.isNotBlank() }
-            val allCookies = mutableListOf<String>()
-            tokens.forEach { token ->
-                when {
-                    token.startsWith("cookies=") -> {
-                        val cookieStr = token.substringAfter("cookies=")
-                        if (cookieStr.isNotBlank()) {
-                            cookieStr.split(";").forEach { c ->
-                                val trimmed = c.trim()
-                                if (trimmed.isNotBlank()) allCookies.add(trimmed)
-                            }
-                        }
-                    }
-                    token.contains("=") -> allCookies.add(token)
-                }
-            }
-            callback(allCookies)
-        }
-    }
-
-    private fun extractClearance(cookies: String?): String? {
-        if (cookies.isNullOrBlank()) return null
-        return cookies.split(";").map { it.trim() }
-            .firstOrNull { it.startsWith("$CLEARANCE_COOKIE=") }
-            ?.substringAfter("=", "")
-            ?.takeIf { it.isNotBlank() }
-    }
-
-    private fun hasClearance(cookieManager: CookieManager, url: String): Boolean {
-        val cookies = cookieManager.getCookie(url) ?: return false
-        return cookies.split(';').any { it.trim().startsWith("$CLEARANCE_COOKIE=") }
-    }
-}
-
-// ============================================================
-// MAIN SOURCE CLASS
-// ============================================================
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 8
+    override val versionId = 6
 
-    private val webViewTokenRegex = Regex("""\;\s*wv\)""")
-
-    private val webViewUserAgent: String? by lazy {
-        runCatching { WebSettings.getDefaultUserAgent(Injekt.get<Application>()) }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
-            ?.replace(webViewTokenRegex, ")")
-    }
-
-    private var lastResolveResult: CloudflareResolver.ResolveResult? = null
-
-    override val client = network.cloudflareClient.newBuilder()
+    override val client = network.client.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
             CookieInterceptor(
@@ -368,78 +73,21 @@ class ProChan : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
-        .apply { webViewUserAgent?.let { set("User-Agent", it) } }
 
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
         .build()
 
-    private fun Request.Builder.withResolveResult(result: CloudflareResolver.ResolveResult?): Request.Builder {
-        if (result == null) return this
-        result.clearanceCookie?.let {
-            header("Cookie", "cf_clearance=$it")
-        }
-        result.extraToken?.let {
-            header("X-CF-Token", it)
-        }
-        return this
-    }
-
-    private fun executeWithRetry(
-        request: Request,
-        resolveUrl: String,
-        allowRetry: Boolean = true,
-    ): Response {
-        val response = client.newCall(request).execute()
-        if (response.isSuccessful) return response
-
-        if (response.code == 403 && allowRetry) {
-            response.close()
-
-            lastResolveResult?.let { cached ->
-                val retry = client.newCall(request.newBuilder().withResolveResult(cached).build()).execute()
-                if (retry.isSuccessful) return retry
-                retry.close()
-            }
-
-            val result = CloudflareResolver.resolveWithFullExtraction(
-                loadUrl = resolveUrl,
-                cookieUrl = request.url.toString(),
-                userAgent = webViewUserAgent,
-                forceResolve = true,
-            )
-
-            if (!result.success) {
-                throw Exception("HTTP 403 - فشل حل Cloudflare Turnstile. يرجى فتح الموقع في WebView ثم المحاولة مرة أخرى.")
-            }
-
-            lastResolveResult = result
-
-            val retryResponse = client.newCall(request.newBuilder().withResolveResult(result).build()).execute()
-            if (retryResponse.isSuccessful) return retryResponse
-
-            retryResponse.close()
-            val modifiedRequest = request.newBuilder()
-                .header("Referer", resolveUrl)
-                .header("Origin", baseUrl)
-                .build()
-            return client.newCall(modifiedRequest).execute()
-        }
-
-        response.close()
-        throw Exception("HTTP error ${response.code}")
-    }
-
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 2
+            firstInstance<<SortFilter>().state = 2
         }
         return fetchSearchManga(page, "", filters)
     }
 
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 1
+            firstInstance<<SortFilter>().state = 1
         }
         return fetchSearchManga(page, "", filters)
     }
@@ -462,16 +110,15 @@ class ProChan : HttpSource() {
 
         return Observable.fromCallable {
             val request = searchMangaRequest(page, query, filters)
-            val response = executeWithRetry(
-                request = request,
-                resolveUrl = "$baseUrl/browse",
-            )
+            val response = client.newCall(request).execute()
             response.use {
-                val statusFilter = filters.firstInstance<StatusFilter>().selected
-                val genreFilter = filters.firstInstance<GenreFilter>()
+                if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+
+                val statusFilter = filters.firstInstance<<StatusFilter>().selected
+                val genreFilter = filters.firstInstance<<GenreFilter>()
                 val tagFilter = filters.firstInstance<TagFilter>()
 
-                val data = response.parseAs<MetaData<BrowseManga>>()
+                val data = response.parseAs<<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
@@ -500,8 +147,8 @@ class ProChan : HttpSource() {
             addQueryParameter("page", page.toString())
             query.takeIf(String::isNotBlank)?.also { addQueryParameter("search", it) }
             filters.firstInstance<TypeFilter>().selected?.also { addQueryParameter("type", it) }
-            addQueryParameter("sort", filters.firstInstance<SortFilter>().selected)
-            filters.firstInstance<YearFilter>().selected?.also { addQueryParameter("year", it) }
+            addQueryParameter("sort", filters.firstInstance<<SortFilter>().selected)
+            filters.firstInstance<<YearFilter>().selected?.also { addQueryParameter("year", it) }
         }.build()
         return GET(url, headers)
     }
@@ -514,7 +161,7 @@ class ProChan : HttpSource() {
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val manga = response.extractNextJs<Series>()!!.series
+        val manga = response.extractNextJs<<Series>()!!.series
         return SManga.create().apply {
             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
             title = manga.title
@@ -569,7 +216,7 @@ class ProChan : HttpSource() {
     override fun chapterListRequest(manga: SManga) = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.extractNextJs<InitialChapters>()!!
+        val data = response.extractNextJs<<InitialChapters>()!!
         val chapters = data.initialChapters.toMutableList()
         val size = chapters.size
         var page = 2
@@ -581,7 +228,7 @@ class ProChan : HttpSource() {
             val request = GET("$baseUrl/api/public/$type/$id/chapters?page=${page++}&limit=$size&order=desc", headers)
             val nextChapters = client.newCall(request).execute()
                 .also { if (!it.isSuccessful) { it.close(); throw Exception("HTTP ${it.code}") } }
-                .parseAs<Data<List<Chapter>>>()
+                .parseAs<Data<List<<Chapter>>>()
             chapters.addAll(nextChapters.data)
         }
 
@@ -618,57 +265,25 @@ class ProChan : HttpSource() {
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
     override fun getChapterUrl(chapter: SChapter): String {
-        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
+        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<<ChapterUrl>() else chapter.url
         return "$baseUrl$url"
     }
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override fun fetchPageList(chapter: SChapter): Observable<List<<Page>> {
         return Observable.fromCallable {
-            executePageListWithRetry(chapter)
-        }
-    }
-
-    private fun executePageListWithRetry(chapter: SChapter): List<Page> {
-        val request = pageListRequest(chapter)
-        val response = executeWithRetry(
-            request = request,
-            resolveUrl = getChapterUrl(chapter),
-        )
-
-        if (!response.isSuccessful) {
-            response.close()
-            throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
-        }
-
-        return try {
-            pageListParse(response)
-        } catch (e: Exception) {
-            response.close()
-            if (e is kotlinx.serialization.MissingFieldException || e.message?.contains("403") == true) {
-                val result = CloudflareResolver.resolveWithFullExtraction(
-                    loadUrl = getChapterUrl(chapter),
-                    cookieUrl = "$baseUrl/chapter-deferred-media/",
-                    userAgent = webViewUserAgent,
-                    forceResolve = true,
-                )
-                if (result.success) {
-                    lastResolveResult = result
-                    val retryResponse = client.newCall(
-                        pageListRequest(chapter).newBuilder().withResolveResult(result).build()
-                    ).execute()
-                    if (retryResponse.isSuccessful) {
-                        return pageListParse(retryResponse)
-                    }
-                    retryResponse.close()
-                }
+            val request = pageListRequest(chapter)
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                response.close()
+                throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
             }
-            throw e
+            pageListParse(response)
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
+    override fun pageListParse(response: Response): List<<Page> {
         val responseBody = response.body.string()
-        val imageData = responseBody.extractNextJsRsc<Images> { element ->
+        val imageData = responseBody.extractNextJsRsc<<Images> { element ->
             element is JsonObject && "images" in element && element["images"] is JsonArray
         }
         if (imageData == null) {
@@ -683,7 +298,7 @@ class ProChan : HttpSource() {
         val chapterId = response.request.url.pathSegments[4]
 
         val images = imageData.images.toMutableList()
-        val maps = mutableListOf<ScrambledData>()
+        val maps = mutableListOf<<ScrambledData>()
 
         if (imageData.deferredMedia != null) {
             val deferredUrl = baseUrl.toHttpUrl().newBuilder()
@@ -691,20 +306,23 @@ class ProChan : HttpSource() {
                 .addPathSegment(chapterId)
                 .addQueryParameter("token", imageData.deferredMedia.token)
                 .build()
-            val deferredResponse = client.newCall(GET(deferredUrl, headers)).execute()
+            val deferredHeaders = headersBuilder()
+                .set("Referer", response.request.url.toString())
+                .build()
+            val deferredResponse = client.newCall(GET(deferredUrl, deferredHeaders)).execute()
             if (!deferredResponse.isSuccessful) {
                 deferredResponse.close()
                 throw Exception("HTTP ${deferredResponse.code} - فشل تحميل الصور المؤجلة")
             }
-            val deferredImages = deferredResponse.parseAs<DeferredImages>()
-            images.addAll(deferredImages.images)
-            maps.addAll(deferredImages.maps)
+            val deferredImages = deferredResponse.parseAs<Data<<DeferredImages>>()
+            images.addAll(deferredImages.data.images)
+            maps.addAll(deferredImages.data.maps)
         }
 
         countViews(seriesId, chapterId)
 
         val chapterUrl = response.request.url.toString()
-        val pages = mutableListOf<Page>()
+        val pages = mutableListOf<<Page>()
         images.mapIndexedTo(pages) { index, imageUrl -> Page(index, chapterUrl, imageUrl) }
         maps.mapIndexedTo(pages) { index, scrambledData ->
             Page(pages.size + index, chapterUrl, "http://$SCRAMBLED_IMAGE_HOST/#${scrambledData.toJsonString()}")
@@ -733,7 +351,7 @@ class ProChan : HttpSource() {
             else -> "cdn3"
         }
 
-        val scrambledImage = when (val scrambledData = url.fragment!!.parseAs<ScrambledData>()) {
+        val scrambledImage = when (val scrambledData = url.fragment!!.parseAs<<ScrambledData>()) {
             is ScrambledImage -> scrambledData
             is ScrambledImageToken -> decodeScrambledImageToken(scrambledData)
         }
@@ -763,7 +381,7 @@ class ProChan : HttpSource() {
                         val signRequest = POST("$baseUrl/api/cdn-image/sign", signHeaders, payload)
                         val response = client.newCall(signRequest).await()
                         if (response.isSuccessful) {
-                            val token = response.parseAs<Token>()
+                            val token = response.parseAs<<Token>()
                             imgUrl = imgUrl.newBuilder()
                                 .setQueryParameter("token", token.token)
                                 .setQueryParameter("expires", token.expires.toString())
@@ -787,8 +405,8 @@ class ProChan : HttpSource() {
             }.awaitAll()
         }
 
-        val resultBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(resultBitmap)
+        val resultBitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(resultBitmap)
 
         try {
             when (puzzleMode) {
@@ -821,7 +439,7 @@ class ProChan : HttpSource() {
             }
 
             val buffer = Buffer().apply {
-                resultBitmap.compress(Bitmap.CompressFormat.JPEG, 90, outputStream())
+                resultBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, outputStream())
             }
             return Response.Builder()
                 .request(request)
@@ -841,7 +459,7 @@ class ProChan : HttpSource() {
 
     private fun decodeScrambledImageToken(data: ScrambledImageToken): ScrambledImage {
         val value = String(urlSafeBase64(data.token), Charsets.UTF_8)
-            .parseAs<ScrambledImageTokenValue>()
+            .parseAs<<ScrambledImageTokenValue>()
 
         val iv = urlSafeBase64(value.iv)
         val tag = urlSafeBase64(value.tag)
@@ -851,7 +469,7 @@ class ProChan : HttpSource() {
             value.m == "browser" && value.v == 2 -> {
                 val hash = MessageDigest.getInstance("SHA-256")
                     .digest(
-                        "prochan-browser-map:2e6f9a1c4d8b7e3f0a5c9d2b6e1f4a8c7d3b0e6a9f2c5d8b1e4a7c0d3f6b9e2:${value.cid}"
+                        "procomic-browser-map:2e6f9a1c4d8b7e3f0a5c9d2b6e1f4a8c7d3b0e6a9f2c5d8b1e4a7c0d3f6b9e2:${value.cid}"
                             .toByteArray(Charsets.UTF_8),
                     )
                 SecretKeySpec(hash, "AES")
@@ -861,10 +479,7 @@ class ProChan : HttpSource() {
                 val key = sessionKey[value.cid]?.takeIf { it.second > time }?.first ?: run {
                     val request = GET("$baseUrl/chapter-map-session-key/${value.cid}", headers)
 
-                    val response = executeWithRetry(
-                        request = request,
-                        resolveUrl = "$baseUrl/chapter-map-session-key/${value.cid}",
-                    )
+                    val response = client.newCall(request).execute()
 
                     if (!response.isSuccessful) {
                         val code = response.code
@@ -872,9 +487,9 @@ class ProChan : HttpSource() {
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة")
                     }
 
-                    val keyData = response.parseAs<Key>()
-                    sessionKey[value.cid] = keyData.key to (time + 120000)
-                    keyData.key
+                    val keyData = response.parseAs<Data<Key>>()
+                    sessionKey[value.cid] = keyData.data.key to (time + 120000)
+                    keyData.data.key
                 }
                 SecretKeySpec(urlSafeBase64(key), "AES")
             }
@@ -891,7 +506,8 @@ class ProChan : HttpSource() {
     }
 
     private fun urlSafeBase64(data: String): ByteArray {
-        return android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
+        return decodeBase64(data)?.toByteArray()
+            ?: throw IllegalArgumentException("Invalid base64: $data")
     }
 
     private fun countViews(seriesId: String, chapterId: String? = null) {
@@ -915,12 +531,12 @@ class ProChan : HttpSource() {
                 object : Callback {
                     override fun onResponse(call: Call, response: Response) {
                         if (!response.isSuccessful) {
-                            Log.e(name, "Failed to count views, HTTP ${response.code}")
+                            android.util.Log.e(name, "Failed to count views, HTTP ${response.code}")
                         }
                         response.closeQuietly()
                     }
                     override fun onFailure(call: Call, e: okio.IOException) {
-                        Log.e(name, "Failed to count views", e)
+                        android.util.Log.e(name, "Failed to count views", e)
                     }
                 },
             )
