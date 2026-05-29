@@ -39,7 +39,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody  // ✅ إصلاح: استيراد toResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.internal.closeQuietly
 import okio.Buffer
 import okio.IOException
@@ -456,7 +456,7 @@ class ProChan : HttpSource() {
     // ─── تشفير Map كـ URL للـ Interceptor ───
     private fun encodeMap(map: ScrambledMap): String {
         val encoded = Base64.encodeToString(
-            json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),  // ✅ إصلاح: serializer صريح
+            json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),
             Base64.URL_SAFE or Base64.NO_WRAP,
         )
         return "$SCRAMBLED_SCHEME$encoded"
@@ -490,7 +490,7 @@ class ProChan : HttpSource() {
                 .protocol(Protocol.HTTP_1_1)
                 .code(500)
                 .message("فشل دمج الصورة")
-                .body("".toResponseBody(null))  // ✅ إصلاح: toResponseBody مستورد
+                .body("".toResponseBody(null))
                 .build()
 
         return Response.Builder()
@@ -498,7 +498,7 @@ class ProChan : HttpSource() {
             .protocol(Protocol.HTTP_1_1)
             .code(200)
             .message("OK")
-            .body(mergedBytes.toResponseBody("image/jpeg".toMediaType()))  // ✅ إصلاح: toResponseBody مستورد
+            .body(mergedBytes.toResponseBody("image/jpeg".toMediaType()))
             .build()
     }
 
