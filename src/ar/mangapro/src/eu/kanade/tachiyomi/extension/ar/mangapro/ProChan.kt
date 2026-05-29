@@ -23,8 +23,6 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -60,8 +58,7 @@ class ProChan : HttpSource() {
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
-        private const val SCRAMBLED_IMAGE_HOST = "procomic.net/__scrambled__"
-        private const val SCRAMBLED_SCHEME = "https://$SCRAMBLED_IMAGE_HOST/"
+        private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
 
     override val client = network.cloudflareClient.newBuilder()
@@ -301,7 +298,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST — باستخدام extractNextJsRsc (الأصل)
+    // PAGE LIST — الطريقة المختلطة (Regex محسّن + API)
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -326,56 +323,130 @@ class ProChan : HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val responseBody = response.body.string()
-        val imageData = responseBody.extractNextJsRsc<Images>()
-
-        if (imageData == null) {
-            val coins = responseBody.extractNextJsRsc<Coins>()?.coins
-            if (coins != null && coins > 0) {
-                throw Exception("فصل مدفوع")
-            } else {
-                return emptyList()
-            }
-        }
-
+        val html = response.body.string()
+        val chapterUrl = response.request.url.toString()
         val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
 
-        val images = imageData.images.toMutableList()
-        val maps = mutableListOf<ScrambledData>()
+        // 1. استخراج الصور المباشرة (أي صيغة)
+        val embeddedImages = extractAllImages(html)
+        // 2. استخراج الـ maps المضمنة
+        val embeddedMaps = extractEmbeddedMaps(html)
+        // 3. استخراج الـ deferred token
+        val deferredToken = extractDeferredToken(html)
 
-        if (imageData.deferredMedia != null) {
-            val deferredUrl = baseUrl.toHttpUrl().newBuilder()
-                .addPathSegment("chapter-deferred-media")
-                .addPathSegment(chapterId)
-                .addQueryParameter("token", imageData.deferredMedia.token)
-                .build()
+        val pages = mutableListOf<Page>()
+        val existingUrls = mutableSetOf<String>()
+        var index = 0
 
-            val deferredResponse = client.newCall(GET(deferredUrl, headers)).execute()
-            if (!deferredResponse.isSuccessful) {
-                val code = deferredResponse.code
-                val body = deferredResponse.body.string().take(200)
-                deferredResponse.close()
-                throw Exception("HTTP $code - فشل جلب الصور المؤجلة: $body")
+        embeddedImages.forEach { url ->
+            pages.add(Page(index++, chapterUrl, url))
+            existingUrls.add(url)
+        }
+
+        embeddedMaps.forEach { map ->
+            if (map.pieces.isNotEmpty()) {
+                val encoded = encodeMap(map)
+                pages.add(Page(index++, chapterUrl, encoded))
+                existingUrls.add(map.pieces.first())
             }
-            val deferredImages = deferredResponse.parseAs<Data<DeferredImages>>()
-            images.addAll(deferredImages.data.images)
-            maps.addAll(deferredImages.data.maps)
+        }
+
+        // إذا لا يوجد token، نعيد ما وجدناه
+        if (deferredToken == null) return pages
+
+        // جلب البيانات المؤجلة من API (بدون split)
+        val apiHeaders = headers.newBuilder()
+            .set("Accept", "application/json")
+            .set("Referer", chapterUrl)
+            .build()
+
+        try {
+            val deferredResponse = client.newCall(
+                GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
+            ).execute()
+
+            if (deferredResponse.isSuccessful) {
+                val deferredData = deferredResponse.parseAs<DeferredImagesWrapper>()
+                deferredData.data.images.forEach { url ->
+                    if (existingUrls.add(url)) {
+                        pages.add(Page(index++, chapterUrl, url))
+                    }
+                }
+                deferredData.data.maps.forEach { scrambledData ->
+                    // تحويل ScrambledData إلى ScrambledMap للتشفير
+                    val map = when (scrambledData) {
+                        is ScrambledImage -> ScrambledMap(
+                            dim = scrambledData.dim,
+                            mode = scrambledData.mode,
+                            pieces = scrambledData.pieces,
+                            order = scrambledData.order
+                        )
+                        is ScrambledImageToken -> {
+                            // إذا كان indirect، نحتاج لفك التشفير أولاً
+                            val decoded = decodeScrambledImageToken(scrambledData)
+                            ScrambledMap(
+                                dim = decoded.dim,
+                                mode = decoded.mode,
+                                pieces = decoded.pieces,
+                                order = decoded.order
+                            )
+                        }
+                    }
+                    val key = map.pieces.firstOrNull() ?: return@forEach
+                    if (existingUrls.add(key)) {
+                        pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                    }
+                }
+            }
+            deferredResponse.close()
+        } catch (e: Exception) {
+            Log.e(name, "فشل جلب الصور المؤجلة", e)
         }
 
         countViews(seriesId, chapterId)
-
-        val chapterUrl = response.request.url.toString()
-        val pages = mutableListOf<Page>()
-
-        images.mapIndexedTo(pages) { index, imageUrl ->
-            Page(index, chapterUrl, imageUrl)
-        }
-        maps.mapIndexedTo(pages) { index, scrambledData ->
-            Page(pages.size + index, chapterUrl, "$SCRAMBLED_SCHEME#${scrambledData.toJsonString()}")
-        }
-
         return pages
+    }
+
+    // استخراج جميع الصور بأي امتداد
+    private fun extractAllImages(html: String): List<String> {
+        val regex = Regex("\"images\":\\[([^\\]]+)\\]")
+        val match = regex.find(html) ?: return emptyList()
+        val content = match.groupValues[1]
+        // استخراج كل الروابط بين علامات التنصيص
+        val urlRegex = Regex("\"(https?://[^\"]+)\"")
+        return urlRegex.findAll(content)
+            .map { it.groupValues[1] }
+            .filter { it.contains("/media/") || it.contains(".avif") || it.contains(".webp") || it.contains(".jpg") || it.contains(".png") }
+            .toList()
+    }
+
+    private fun extractEmbeddedMaps(html: String): List<ScrambledMap> {
+        return try {
+            val regex = Regex("\"maps\":\\[(\\{.*?\\})\\]")
+            val match = regex.find(html) ?: return emptyList()
+            val mapsJson = "[${match.groupValues[1]}]"
+            json.decodeFromString<List<ScrambledMap>>(mapsJson)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun extractDeferredToken(html: String): String? {
+        // البحث عن token في deferredMedia
+        val regex1 = Regex("\"deferredMedia\":\\{\"token\":\"([^\"]+)\"")
+        regex1.find(html)?.let { return it.groupValues[1] }
+        // البحث عن JWT مباشرة
+        val regex2 = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
+        return regex2.find(html)?.value
+    }
+
+    private fun encodeMap(map: ScrambledMap): String {
+        val encoded = Base64.encodeToString(
+            json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_WRAP
+        )
+        return "$SCRAMBLED_SCHEME$encoded"
     }
 
     override fun imageRequest(page: Page): Request {
@@ -396,8 +467,8 @@ class ProChan : HttpSource() {
             return chain.proceed(request)
         }
 
-        val fragment = request.url.fragment ?: return chain.proceed(request)
-        val mapJson = fragment.substringAfter('#')
+        val encoded = url.removePrefix(SCRAMBLED_SCHEME)
+        val mapJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val map = json.decodeFromString<ScrambledMap>(mapJson)
 
         val mergedBytes = reconstructPage(map)
@@ -418,9 +489,9 @@ class ProChan : HttpSource() {
             .build()
     }
 
-    // ════════════════════════════════════════════════════════
+    // =================================================================
     // IMAGE RECONSTRUCTION
-    // ════════════════════════════════════════════════════════
+    // =================================================================
     private fun reconstructPage(map: ScrambledMap): ByteArray? {
         val totalW = map.dim.getOrElse(0) { 800 }
         val totalH = map.dim.getOrElse(1) { 1200 }
@@ -641,3 +712,9 @@ private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "com
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 private val MOBILE_REGEX = Regex("mobile|android|iphone|ipad|ipod", RegexOption.IGNORE_CASE)
 private val TABLES_REGEX = Regex("tablet", RegexOption.IGNORE_CASE)
+
+// Helper data class للـ API response
+@kotlinx.serialization.Serializable
+data class DeferredImagesWrapper(
+    val data: DeferredImages
+)
