@@ -128,7 +128,7 @@ class Series(
             val artist: List<String> = emptyList(),
             val year: String? = null,
             val genres: List<String> = emptyList(),
-            val tags: List<String> = emptyList(),  // ✅ إصلاح: emptyList() بدلاً من emptySet()
+            val tags: List<String> = emptyList(),
             val origin: String? = null,
             val coverImage: String? = null,
         )
