@@ -56,9 +56,14 @@ class ProChan : HttpSource() {
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 6
+    override val versionId = 7 // زُيدت بعد الإصلاحات
 
-    // IMPORTANT: Use cloudflareClient to handle Cloudflare challenges and cf_clearance cookies
+    // =================================================================
+    // CLIENT CONFIGURATION
+    // =================================================================
+    // استخدام cloudflareClient للتعامل مع تحديات Cloudflare العادية.
+    // ملاحظة: إذا كان الموقع يستخدم Turnstile، قد يحتاج المستخدم إلى
+    // فتح الموقع في WebView أولاً لحل التحدي يدوياً.
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -75,26 +80,31 @@ class ProChan : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
+        .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
 
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
         .build()
 
+    // =================================================================
+    // POPULAR / LATEST / SEARCH
+    // =================================================================
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 2
+            firstInstance<<SortFilter>().state = 2
         }
         return fetchSearchManga(page, "", filters)
     }
 
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 1
+            firstInstance<<SortFilter>().state = 1
         }
         return fetchSearchManga(page, "", filters)
     }
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
+        // دعم الروابط المباشرة
         if (query.startsWith("https://")) {
             val url = query.toHttpUrl()
             val path = url.pathSegments
@@ -114,13 +124,19 @@ class ProChan : HttpSource() {
             val request = searchMangaRequest(page, query, filters)
             val response = client.newCall(request).execute()
             response.use {
-                if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+                if (!response.isSuccessful) {
+                    // ✅ إصلاح: رسالة خطأ واضحة عند Cloudflare block
+                    if (response.code == 403) {
+                        throw Exception("تم حظر الوصول بواسطة Cloudflare. جرب فتح الموقع في WebView أولاً.")
+                    }
+                    throw Exception("HTTP ${response.code}")
+                }
 
-                val statusFilter = filters.firstInstance<StatusFilter>().selected
-                val genreFilter = filters.firstInstance<GenreFilter>()
+                val statusFilter = filters.firstInstance<<StatusFilter>().selected
+                val genreFilter = filters.firstInstance<<GenreFilter>()
                 val tagFilter = filters.firstInstance<TagFilter>()
 
-                val data = response.parseAs<MetaData<BrowseManga>>()
+                val data = response.parseAs<<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
@@ -149,8 +165,8 @@ class ProChan : HttpSource() {
             addQueryParameter("page", page.toString())
             query.takeIf(String::isNotBlank)?.also { addQueryParameter("search", it) }
             filters.firstInstance<TypeFilter>().selected?.also { addQueryParameter("type", it) }
-            addQueryParameter("sort", filters.firstInstance<SortFilter>().selected)
-            filters.firstInstance<YearFilter>().selected?.also { addQueryParameter("year", it) }
+            addQueryParameter("sort", filters.firstInstance<<SortFilter>().selected)
+            filters.firstInstance<<YearFilter>().selected?.also { addQueryParameter("year", it) }
         }.build()
         return GET(url, headers)
     }
@@ -159,11 +175,20 @@ class ProChan : HttpSource() {
         TypeFilter(), SortFilter(), YearFilter(), StatusFilter(), GenreFilter(), TagFilter(),
     )
 
+    // =================================================================
+    // MANGA DETAILS
+    // =================================================================
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val manga = response.extractNextJs<Series>()!!.series
+        // ✅ إصلاح: فحص isSuccessful + Cloudflare
+        if (!response.isSuccessful) {
+            if (response.code == 403) throw Exception("تم حظر الوصول بواسطة Cloudflare")
+            throw Exception("HTTP ${response.code}")
+        }
+
+        val manga = response.extractNextJs<<Series>()!!.series
         return SManga.create().apply {
             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
             title = manga.title
@@ -215,10 +240,19 @@ class ProChan : HttpSource() {
         }
     }
 
+    // =================================================================
+    // CHAPTER LIST
+    // =================================================================
     override fun chapterListRequest(manga: SManga) = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.extractNextJs<InitialChapters>()!!
+        // ✅ إصلاح: فحص isSuccessful + Cloudflare
+        if (!response.isSuccessful) {
+            if (response.code == 403) throw Exception("تم حظر الوصول بواسطة Cloudflare")
+            throw Exception("HTTP ${response.code}")
+        }
+
+        val data = response.extractNextJs<<InitialChapters>()!!
         val chapters = data.initialChapters.toMutableList()
         val size = chapters.size
         var page = 2
@@ -226,11 +260,18 @@ class ProChan : HttpSource() {
         val id = response.request.url.pathSegments[2]
         val slug = response.request.url.pathSegments[3]
 
+        // ✅ إصلاح: فحص isSuccessful لكل صفحة إضافية
         while (data.totalChapters > chapters.size) {
             val request = GET("$baseUrl/api/public/$type/$id/chapters?page=${page++}&limit=$size&order=desc", headers)
-            val nextChapters = client.newCall(request).execute()
-                .also { if (!it.isSuccessful) { it.close(); throw Exception("HTTP ${it.code}") } }
-                .parseAs<Data<List<Chapter>>>()
+            val nextResponse = client.newCall(request).execute()
+            if (!nextResponse.isSuccessful) {
+                nextResponse.close()
+                if (nextResponse.code == 403) {
+                    throw Exception("تم حظر الوصول بواسطة Cloudflare عند جلب الصفحة ${page - 1}")
+                }
+                throw Exception("HTTP ${nextResponse.code} - فشل جلب الصفحة ${page - 1}")
+            }
+            val nextChapters = nextResponse.parseAs<Data<List<<Chapter>>>()
             chapters.addAll(nextChapters.data)
         }
 
@@ -260,39 +301,50 @@ class ProChan : HttpSource() {
             .sortedByDescending { it.chapter_number }
     }
 
+    // ✅ إصلاح: إضافة UTC timezone
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
+    // =================================================================
+    // PAGE LIST
+    // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
     override fun getChapterUrl(chapter: SChapter): String {
-        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
+        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<<ChapterUrl>() else chapter.url
         return "$baseUrl$url"
     }
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override fun fetchPageList(chapter: SChapter): Observable<List<<Page>> {
         return Observable.fromCallable {
             val request = pageListRequest(chapter)
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
                 response.close()
+                // ✅ إصلاح: رسالة Cloudflare واضحة
+                if (response.code == 403) {
+                    throw Exception("تم حظر الوصول بواسطة Cloudflare. جرب فتح الموقع في WebView أولاً.")
+                }
                 throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
             }
             pageListParse(response)
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
+    override fun pageListParse(response: Response): List<<Page> {
         val responseBody = response.body.string()
-        val imageData = responseBody.extractNextJsRsc<Images> { element ->
+        val imageData = responseBody.extractNextJsRsc<<Images> { element ->
             element is JsonObject && "images" in element && element["images"] is JsonArray
         }
         if (imageData == null) {
             val coins = responseBody.extractNextJsRsc<Coins> { element ->
                 element is JsonObject && "coins" in element
             }?.coins
-            if (coins != null && coins > 0) throw Exception("فصل مدفوع")
+            if (coins != null && coins > 0) {
+                // ✅ إصلاح: رسالة واضحة للفصل المدفوع
+                throw Exception("فصل مدفوع (${coins} coins) - غير متاح")
+            }
             else return emptyList()
         }
 
@@ -300,7 +352,7 @@ class ProChan : HttpSource() {
         val chapterId = response.request.url.pathSegments[4]
 
         val images = imageData.images.toMutableList()
-        val maps = mutableListOf<ScrambledData>()
+        val maps = mutableListOf<<ScrambledData>()
 
         if (imageData.deferredMedia != null) {
             val deferredUrl = baseUrl.toHttpUrl().newBuilder()
@@ -312,11 +364,15 @@ class ProChan : HttpSource() {
                 .set("Referer", response.request.url.toString())
                 .build()
             val deferredResponse = client.newCall(GET(deferredUrl, deferredHeaders)).execute()
+            // ✅ إصلاح: فحص isSuccessful + Cloudflare
             if (!deferredResponse.isSuccessful) {
                 deferredResponse.close()
+                if (deferredResponse.code == 403) {
+                    throw Exception("تم حظر الوصول للصور المؤجلة بواسطة Cloudflare")
+                }
                 throw Exception("HTTP ${deferredResponse.code} - فشل تحميل الصور المؤجلة")
             }
-            val deferredImages = deferredResponse.parseAs<Data<DeferredImages>>()
+            val deferredImages = deferredResponse.parseAs<Data<<DeferredImages>>()
             images.addAll(deferredImages.data.images)
             maps.addAll(deferredImages.data.maps)
         }
@@ -324,7 +380,7 @@ class ProChan : HttpSource() {
         countViews(seriesId, chapterId)
 
         val chapterUrl = response.request.url.toString()
-        val pages = mutableListOf<Page>()
+        val pages = mutableListOf<<Page>()
         images.mapIndexedTo(pages) { index, imageUrl -> Page(index, chapterUrl, imageUrl) }
         maps.mapIndexedTo(pages) { index, scrambledData ->
             Page(pages.size + index, chapterUrl, "http://$SCRAMBLED_IMAGE_HOST/#${scrambledData.toJsonString()}")
@@ -339,6 +395,9 @@ class ProChan : HttpSource() {
         return GET(page.imageUrl!!, headers)
     }
 
+    // =================================================================
+    // SCRAMBLED IMAGE INTERCEPTOR
+    // =================================================================
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url
@@ -353,9 +412,14 @@ class ProChan : HttpSource() {
             else -> "cdn3"
         }
 
-        val scrambledImage = when (val scrambledData = url.fragment!!.parseAs<ScrambledData>()) {
-            is ScrambledImage -> scrambledData
-            is ScrambledImageToken -> decodeScrambledImageToken(scrambledData)
+        // ✅ إصلاح: إضافة try-catch حول فك التشفير
+        val scrambledImage = try {
+            when (val scrambledData = url.fragment!!.parseAs<<ScrambledData>()) {
+                is ScrambledImage -> scrambledData
+                is ScrambledImageToken -> decodeScrambledImageToken(scrambledData)
+            }
+        } catch (e: Exception) {
+            throw IOException("فشل فك تشفير الصورة المشفرة: ${e.message}", e)
         }
 
         val (puzzleMode, layout) = scrambledImage.mode.split("_", limit = 2)
@@ -381,20 +445,26 @@ class ProChan : HttpSource() {
                             .set("Referer", chapterUrl)
                             .build()
                         val signRequest = POST("$baseUrl/api/cdn-image/sign", signHeaders, payload)
-                        val response = client.newCall(signRequest).await()
-                        if (response.isSuccessful) {
-                            val token = response.parseAs<Token>()
+                        val signResponse = client.newCall(signRequest).await()
+                        if (signResponse.isSuccessful) {
+                            val token = signResponse.parseAs<<Token>()
                             imgUrl = imgUrl.newBuilder()
                                 .setQueryParameter("token", token.token)
                                 .setQueryParameter("expires", token.expires.toString())
                                 .build()
                         } else {
-                            response.close()
+                            signResponse.close()
+                            // إذا فشل التوقيع، نحاول المتابعة بدون token
                         }
                     }
                     val pieceRequest = request.newBuilder().url(imgUrl).build()
-                    val response = client.newCall(pieceRequest).await()
-                    response.body.use { body ->
+                    val pieceResponse = client.newCall(pieceRequest).await()
+                    // ✅ إصلاح: فحص isSuccessful لقطع الصور
+                    if (!pieceResponse.isSuccessful) {
+                        pieceResponse.close()
+                        throw IOException("فشل تحميل قطعة الصورة: HTTP ${pieceResponse.code}")
+                    }
+                    pieceResponse.body.use { body ->
                         val decoder = ImageDecoder.newInstance(body.byteStream())
                             ?: throw Exception("Failed to create decoder")
                         try {
@@ -456,12 +526,15 @@ class ProChan : HttpSource() {
         }
     }
 
+    // =================================================================
+    // TOKEN DECRYPTION
+    // =================================================================
     private val sessionKey = ConcurrentHashMap<Int, Pair<String, Long>>()
     private val sessionKeyLock = Any()
 
     private fun decodeScrambledImageToken(data: ScrambledImageToken): ScrambledImage {
         val value = String(urlSafeBase64(data.token), Charsets.UTF_8)
-            .parseAs<ScrambledImageTokenValue>()
+            .parseAs<<ScrambledImageTokenValue>()
 
         val iv = urlSafeBase64(value.iv)
         val tag = urlSafeBase64(value.tag)
@@ -481,9 +554,13 @@ class ProChan : HttpSource() {
                 val key = sessionKey[value.cid]?.takeIf { it.second > time }?.first ?: run {
                     val request = GET("$baseUrl/chapter-map-session-key/${value.cid}", headers)
                     val response = client.newCall(request).execute()
+                    // ✅ إصلاح: فحص isSuccessful + Cloudflare
                     if (!response.isSuccessful) {
                         val code = response.code
                         response.close()
+                        if (code == 403) {
+                            throw Exception("تم حظر الوصول بواسطة Cloudflare عند جلب مفتاح الجلسة")
+                        }
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة")
                     }
                     val keyData = response.parseAs<Data<Key>>()
@@ -508,6 +585,9 @@ class ProChan : HttpSource() {
         return android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
     }
 
+    // =================================================================
+    // VIEWS COUNTING (non-blocking)
+    // =================================================================
     private fun countViews(seriesId: String, chapterId: String? = null) {
         val userAgent = headers["User-Agent"]!!
         val payload = ViewsDto(
@@ -540,6 +620,9 @@ class ProChan : HttpSource() {
             )
     }
 
+    // =================================================================
+    // UNSUPPORTED METHODS
+    // =================================================================
     override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
     override fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
     override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
@@ -548,7 +631,8 @@ class ProChan : HttpSource() {
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
 
-private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua")
+// ✅ إصلاح: توسيع الأنواع المدعومة
+private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "comic")
 private const val SCRAMBLED_IMAGE_HOST = "127.0.0.1"
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 private val MOBILE_REGEX = Regex("mobile|android|iphone|ipad|ipod", RegexOption.IGNORE_CASE)
