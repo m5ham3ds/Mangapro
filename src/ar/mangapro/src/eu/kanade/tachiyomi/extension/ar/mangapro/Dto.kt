@@ -29,9 +29,6 @@ import kotlinx.serialization.PolymorphicSerializer
 // SECTION 1: RESPONSE WRAPPERS
 // =================================================================
 
-/**
- * Generic paginated response wrapper for browse/search endpoints.
- */
 @Serializable
 class MetaData<T>(
     val data: List<T>,
@@ -46,9 +43,6 @@ class MetaData<T>(
     }
 }
 
-/**
- * Generic data wrapper for single-object API responses.
- */
 @Serializable
 class Data<T>(
     val data: T,
@@ -58,9 +52,6 @@ class Data<T>(
 // SECTION 2: MANGA / SERIES DTOs
 // =================================================================
 
-/**
- * Manga item returned from browse/search API.
- */
 @Serializable
 class BrowseManga(
     val id: Int,
@@ -81,27 +72,18 @@ class BrowseManga(
     )
 }
 
-/**
- * Cover image variants (desktop, mobile, card).
- */
 @Serializable
 class CoverImage(
     val desktop: String? = null,
     val card: CardImages? = null,
 )
 
-/**
- * Card-sized image variants for thumbnails.
- */
 @Serializable
 class CardImages(
     val mobile: String? = null,
     val desktop: String? = null,
 )
 
-/**
- * Series detail response wrapper.
- */
 @Serializable
 class Series(
     val series: Manga,
@@ -140,18 +122,12 @@ class Series(
 // SECTION 3: CHAPTER DTOs
 // =================================================================
 
-/**
- * Initial chapters payload from series page (RSC).
- */
 @Serializable
 class InitialChapters(
     val initialChapters: List<Chapter>,
     val totalChapters: Int,
 )
 
-/**
- * Single chapter data.
- */
 @Serializable
 class Chapter(
     val id: Int,
@@ -167,21 +143,15 @@ class Chapter(
     val createdAt: String? = null,
 )
 
-/**
- * Chapter URL wrapper for stored chapter URLs.
- */
 @Serializable
 class ChapterUrl(
     val url: String,
 )
 
 // =================================================================
-// SECTION 4: PAGE / IMAGE DTOs — Original API
+// SECTION 4: PAGE / IMAGE DTOs
 // =================================================================
 
-/**
- * Images payload from chapter page (extractNextJsRsc).
- */
 @Serializable
 class Images(
     val images: List<String>,
@@ -189,17 +159,11 @@ class Images(
     val deferredMedia: DeferredMediaToken? = null,
 )
 
-/**
- * Deferred media token for lazy-loaded images.
- */
 @Serializable
 class DeferredMediaToken(
     val token: String,
 )
 
-/**
- * Deferred images response from /chapter-deferred-media endpoint.
- */
 @Serializable
 class DeferredImages(
     val images: List<String>,
@@ -208,18 +172,12 @@ class DeferredImages(
 )
 
 // =================================================================
-// SECTION 5: SCRAMBLED IMAGE DTOs — Original Token-based
+// SECTION 5: SCRAMBLED IMAGE DTOs (Direct/Indirect)
 // =================================================================
 
-/**
- * Sealed class for scrambled image data (direct or indirect/token).
- */
 @Serializable
 sealed class ScrambledData
 
-/**
- * Direct scrambled image with mode, order, pieces, dim.
- */
 @Serializable
 @SerialName("direct")
 class ScrambledImage(
@@ -229,9 +187,6 @@ class ScrambledImage(
     val dim: List<Int>,
 ) : ScrambledData()
 
-/**
- * Indirect scrambled image requiring token decryption.
- */
 @Serializable
 @SerialName("indirect")
 class ScrambledImageToken(
@@ -239,9 +194,6 @@ class ScrambledImageToken(
     val method: String,
 ) : ScrambledData()
 
-/**
- * Decrypted token value for AES-GCM decryption.
- */
 @Serializable
 class ScrambledImageTokenValue(
     val cid: Int,
@@ -253,13 +205,9 @@ class ScrambledImageTokenValue(
 )
 
 // =================================================================
-// SECTION 6: SCRAMBLED IMAGE DTOs — NEW Fixed Interceptor
+// SECTION 6: SCRAMBLED MAP (For Interceptor)
 // =================================================================
 
-/**
- * Scrambled map for the fixed image reconstruction interceptor.
- * Used with SCRAMBLED_SCHEME URLs.
- */
 @Serializable
 data class ScrambledMap(
     val dim: List<Int> = emptyList(),
@@ -268,18 +216,12 @@ data class ScrambledMap(
     val order: List<Int> = emptyList(),
 )
 
-/**
- * Response wrapper for /chapter-deferred-media API (fixed interceptor).
- */
 @Serializable
 class ChapterDeferredResponse(
     val success: Boolean = false,
     val data: ChapterDeferredData? = null,
 )
 
-/**
- * Deferred chapter data containing images and scrambled maps.
- */
 @Serializable
 class ChapterDeferredData(
     val chapterId: Int = 0,
@@ -289,45 +231,30 @@ class ChapterDeferredData(
 )
 
 // =================================================================
-// SECTION 7: UTILITY / MISC DTOs
+// SECTION 7: UTILITY / MISC
 // =================================================================
 
-/**
- * AES key response for session-based decryption.
- */
 @Serializable
 class Key(
     val key: String,
 )
 
-/**
- * Coin requirement check response.
- */
 @Serializable
 class Coins(
     val coins: Int,
 )
 
-/**
- * Generic URL wrapper.
- */
 @Serializable
 class Url(
     val url: String,
 )
 
-/**
- * CDN image signed token.
- */
 @Serializable
 class Token(
     val token: String,
     val expires: Long,
 )
 
-/**
- * Views counting payload.
- */
 @Serializable
 class ViewsDto(
     val chapterId: Int? = null,
@@ -340,10 +267,6 @@ class ViewsDto(
 // SECTION 8: CUSTOM SERIALIZERS
 // =================================================================
 
-/**
- * Serializer that handles author/artist fields that may be
- * a newline-separated string OR a JSON array.
- */
 object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSerializer(String.serializer())) {
     override fun transformDeserialize(element: JsonElement): JsonElement = when {
         element is JsonPrimitive -> {
@@ -357,10 +280,6 @@ object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSeria
     }
 }
 
-/**
- * Serializer for deferredMedia field that may be a JSON primitive (null)
- * or an object containing a token.
- */
 object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
     override val descriptor = DeferredMediaToken.serializer().descriptor
 
@@ -382,10 +301,6 @@ object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
     }
 }
 
-/**
- * Serializer for ScrambledData list that adds a "type" discriminator
- * based on whether "method" field is present (indirect) or not (direct).
- */
 object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>(
     ListSerializer(PolymorphicSerializer(ScrambledData::class))
 ) {
