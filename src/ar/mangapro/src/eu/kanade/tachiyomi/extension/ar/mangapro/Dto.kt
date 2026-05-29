@@ -17,6 +17,20 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 
+// ═══════════════════════════════════════════════════════════════════
+//  DTO.kt — ProChan Extension Data Transfer Objects
+//  Merged & Enhanced: Original + ScrambledMap + ChapterDeferred
+//  Domain: procomic.net / procomic.pro
+//  Version: 2.0
+// ═══════════════════════════════════════════════════════════════════
+
+// =================================================================
+// SECTION 1: RESPONSE WRAPPERS
+// =================================================================
+
+/**
+ * Generic paginated response wrapper for browse/search endpoints.
+ */
 @Serializable
 class MetaData<T>(
     val data: List<T>,
@@ -31,11 +45,21 @@ class MetaData<T>(
     }
 }
 
+/**
+ * Generic data wrapper for single-object API responses.
+ */
 @Serializable
 class Data<T>(
     val data: T,
 )
 
+// =================================================================
+// SECTION 2: MANGA / SERIES DTOs
+// =================================================================
+
+/**
+ * Manga item returned from browse/search API.
+ */
 @Serializable
 class BrowseManga(
     val id: Int,
@@ -43,24 +67,40 @@ class BrowseManga(
     val slug: String,
     val type: String,
     val progress: String? = null,
-    val metadata: MetaData,
+    val metadata: BrowseMetaData,
     val coverImage: String? = null,
     val coverImageApp: CoverImage? = null,
     @SerialName("cdn_path")
     val cdn: String? = null,
 ) {
     @Serializable
-    class MetaData(
+    class BrowseMetaData(
         val genres: Set<String> = emptySet(),
         val tags: Set<String> = emptySet(),
     )
 }
 
+/**
+ * Cover image variants (desktop, mobile, card).
+ */
 @Serializable
 class CoverImage(
     val desktop: String? = null,
+    val card: CardImages? = null,
 )
 
+/**
+ * Card-sized image variants for thumbnails.
+ */
+@Serializable
+class CardImages(
+    val mobile: String? = null,
+    val desktop: String? = null,
+)
+
+/**
+ * Series detail response wrapper.
+ */
 @Serializable
 class Series(
     val series: Manga,
@@ -73,13 +113,13 @@ class Series(
         val type: String,
         val description: String? = null,
         val progress: String? = null,
-        val metadata: MetaData,
+        val metadata: SeriesMetaData,
         @SerialName("cdn_path")
         val cdn: String? = null,
         val coverImageApp: CoverImage? = null,
     ) {
         @Serializable
-        class MetaData(
+        class SeriesMetaData(
             val originalTitle: String? = null,
             val altTitles: List<String> = emptyList(),
             @Serializable(with = StringListSerializer::class)
@@ -88,33 +128,29 @@ class Series(
             val artist: List<String> = emptyList(),
             val year: String? = null,
             val genres: List<String> = emptyList(),
-            val tags: List<String> = emptyList(),
+            val tags: List<String> = emptySet(),
             val origin: String? = null,
             val coverImage: String? = null,
         )
     }
 }
 
-object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSerializer(String.serializer())) {
-    override fun transformDeserialize(element: JsonElement): JsonElement = when {
-        element is JsonPrimitive -> {
-            val elements = element.contentOrNull
-                ?.split("\n")
-                ?.map { JsonPrimitive(it.trim()) }
-                .orEmpty()
+// =================================================================
+// SECTION 3: CHAPTER DTOs
+// =================================================================
 
-            JsonArray(elements)
-        }
-        else -> element
-    }
-}
-
+/**
+ * Initial chapters payload from series page (RSC).
+ */
 @Serializable
 class InitialChapters(
     val initialChapters: List<Chapter>,
     val totalChapters: Int,
 )
 
+/**
+ * Single chapter data.
+ */
 @Serializable
 class Chapter(
     val id: Int,
@@ -130,11 +166,21 @@ class Chapter(
     val createdAt: String? = null,
 )
 
+/**
+ * Chapter URL wrapper for stored chapter URLs.
+ */
 @Serializable
 class ChapterUrl(
     val url: String,
 )
 
+// =================================================================
+// SECTION 4: PAGE / IMAGE DTOs — Original API
+// =================================================================
+
+/**
+ * Images payload from chapter page (extractNextJsRsc).
+ */
 @Serializable
 class Images(
     val images: List<String>,
@@ -142,11 +188,178 @@ class Images(
     val deferredMedia: DeferredMediaToken? = null,
 )
 
+/**
+ * Deferred media token for lazy-loaded images.
+ */
 @Serializable
 class DeferredMediaToken(
     val token: String,
 )
 
+/**
+ * Deferred images response from /chapter-deferred-media endpoint.
+ */
+@Serializable
+class DeferredImages(
+    val images: List<String>,
+    @Serializable(ScrambledDataSerializer::class)
+    val maps: List<ScrambledData>,
+)
+
+// =================================================================
+// SECTION 5: SCRAMBLED IMAGE DTOs — Original Token-based
+// =================================================================
+
+/**
+ * Sealed class for scrambled image data (direct or indirect/token).
+ */
+@Serializable
+sealed class ScrambledData
+
+/**
+ * Direct scrambled image with mode, order, pieces, dim.
+ */
+@Serializable
+@SerialName("direct")
+class ScrambledImage(
+    val mode: String,
+    val order: List<Int>,
+    val pieces: List<String>,
+    val dim: List<Int>,
+) : ScrambledData()
+
+/**
+ * Indirect scrambled image requiring token decryption.
+ */
+@Serializable
+@SerialName("indirect")
+class ScrambledImageToken(
+    val token: String,
+    val method: String,
+) : ScrambledData()
+
+/**
+ * Decrypted token value for AES-GCM decryption.
+ */
+@Serializable
+class ScrambledImageTokenValue(
+    val cid: Int,
+    val data: String,
+    val iv: String,
+    val m: String,
+    val tag: String,
+    val v: Int,
+)
+
+// =================================================================
+// SECTION 6: SCRAMBLED IMAGE DTOs — NEW Fixed Interceptor
+// =================================================================
+
+/**
+ * Scrambled map for the fixed image reconstruction interceptor.
+ * Used with SCRAMBLED_SCHEME URLs.
+ */
+@Serializable
+data class ScrambledMap(
+    val dim: List<Int> = emptyList(),
+    val mode: String = "",
+    val pieces: List<String> = emptyList(),
+    val order: List<Int> = emptyList(),
+)
+
+/**
+ * Response wrapper for /chapter-deferred-media API (fixed interceptor).
+ */
+@Serializable
+class ChapterDeferredResponse(
+    val success: Boolean = false,
+    val data: ChapterDeferredData? = null,
+)
+
+/**
+ * Deferred chapter data containing images and scrambled maps.
+ */
+@Serializable
+class ChapterDeferredData(
+    val chapterId: Int = 0,
+    val splitIndex: Int = 0,
+    val images: List<String> = emptyList(),
+    val maps: List<ScrambledMap> = emptyList(),
+)
+
+// =================================================================
+// SECTION 7: UTILITY / MISC DTOs
+// =================================================================
+
+/**
+ * AES key response for session-based decryption.
+ */
+@Serializable
+class Key(
+    val key: String,
+)
+
+/**
+ * Coin requirement check response.
+ */
+@Serializable
+class Coins(
+    val coins: Int,
+)
+
+/**
+ * Generic URL wrapper.
+ */
+@Serializable
+class Url(
+    val url: String,
+)
+
+/**
+ * CDN image signed token.
+ */
+@Serializable
+class Token(
+    val token: String,
+    val expires: Long,
+)
+
+/**
+ * Views counting payload.
+ */
+@Serializable
+class ViewsDto(
+    val chapterId: Int? = null,
+    val contentId: Int,
+    val deviceType: String,
+    val surface: String,
+)
+
+// =================================================================
+// SECTION 8: CUSTOM SERIALIZERS
+// =================================================================
+
+/**
+ * Serializer that handles author/artist fields that may be
+ * a newline-separated string OR a JSON array.
+ */
+object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSerializer(String.serializer())) {
+    override fun transformDeserialize(element: JsonElement): JsonElement = when {
+        element is JsonPrimitive -> {
+            val elements = element.contentOrNull
+                ?.split("\n")
+                ?.map { JsonPrimitive(it.trim()) }
+                .orEmpty()
+            JsonArray(elements)
+        }
+        else -> element
+    }
+}
+
+/**
+ * Serializer for deferredMedia field that may be a JSON primitive (null)
+ * or an object containing a token.
+ */
 object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
     override val descriptor = DeferredMediaToken.serializer().descriptor
 
@@ -168,32 +381,10 @@ object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
     }
 }
 
-@Serializable
-class DeferredImages(
-    val images: List<String>,
-    @Serializable(ScrambledDataSerializer::class)
-    val maps: List<ScrambledData>,
-)
-
-@Serializable
-sealed class ScrambledData
-
-@Serializable
-@SerialName("direct")
-class ScrambledImage(
-    val mode: String,
-    val order: List<Int>,
-    val pieces: List<String>,
-    val dim: List<Int>,
-) : ScrambledData()
-
-@Serializable
-@SerialName("indirect")
-class ScrambledImageToken(
-    val token: String,
-    val method: String,
-) : ScrambledData()
-
+/**
+ * Serializer for ScrambledData list that adds a "type" discriminator
+ * based on whether "method" field is present (indirect) or not (direct).
+ */
 object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>(ListSerializer(ScrambledData.serializer())) {
     override fun transformDeserialize(element: JsonElement): JsonElement = JsonArray(
         element.jsonArray.map { jsonElement ->
@@ -202,7 +393,6 @@ object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>
                 "method" in jsonObject -> JsonObject(
                     jsonObject + ("type" to JsonPrimitive("indirect")),
                 )
-
                 else -> JsonObject(
                     jsonObject + ("type" to JsonPrimitive("direct")),
                 )
@@ -210,42 +400,3 @@ object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>
         },
     )
 }
-
-@Serializable
-class ScrambledImageTokenValue(
-    val cid: Int,
-    val data: String,
-    val iv: String,
-    val m: String,
-    val tag: String,
-    val v: Int,
-)
-
-@Serializable
-class Key(
-    val key: String,
-)
-
-@Serializable
-class Coins(
-    val coins: Int,
-)
-
-@Serializable
-class Url(
-    val url: String,
-)
-
-@Serializable
-class Token(
-    val token: String,
-    val expires: Long,
-)
-
-@Serializable
-class ViewsDto(
-    val chapterId: Int? = null,
-    val contentId: Int,
-    val deviceType: String,
-    val surface: String,
-)
