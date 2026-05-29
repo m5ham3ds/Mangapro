@@ -5,7 +5,10 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Base64
+import android.util.Log
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -24,12 +27,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.decodeFromStream
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -61,12 +61,12 @@ class ProChan : HttpSource() {
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 8 // زُيدت بعد إصلاح scrambled images
+    override val versionId = 8
 
     private val json = Json { ignoreUnknownKeys = true }
 
     // =================================================================
-    // SCRAMBLED IMAGE INTERCEPTOR — الإصلاح الجوهري
+    // SCRAMBLED IMAGE INTERCEPTOR
     // =================================================================
     companion object {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
@@ -334,13 +334,13 @@ class ProChan : HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val responseBody = response.body.string()
-        
+        val html = response.body.string()
+
         // ─── استخراج البيانات المضمّنة في HTML أولاً ───
-        val embeddedImages = extractEmbeddedImages(responseBody)
-        val embeddedMaps = extractEmbeddedMaps(responseBody)
-        val deferredToken = extractDeferredToken(responseBody)
-        
+        val embeddedImages = extractEmbeddedImages(html)
+        val embeddedMaps = extractEmbeddedMaps(html)
+        val deferredToken = extractDeferredToken(html)
+
         val pages = mutableListOf<Page>()
         val existingUrls = mutableSetOf<String>()
         var index = 0
@@ -356,15 +356,15 @@ class ProChan : HttpSource() {
             if (map.pieces.isEmpty()) return@forEach
             val encoded = encodeMap(map)
             pages.add(Page(index++, imageUrl = encoded))
-            existingUrls.add(map.pieces.first()) // استخدام أول قطعة كمعرّف
+            existingUrls.add(map.pieces.first())
         }
 
         // إذا لا يوجد token → نعيد ما وجدناه فقط
         if (deferredToken == null) return pages
 
         // ─── جلب الصفحات المؤجلة ───
-        val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
+        val seriesId = response.request.url.pathSegments[2]
 
         val apiHeaders = headers.newBuilder()
             .set("Accept", "application/json")
@@ -419,10 +419,10 @@ class ProChan : HttpSource() {
     // ─── استخراج الصور الأولى من HTML ───
     private fun extractEmbeddedImages(html: String): List<String> {
         return try {
-            val regex = Regex("""\"images\":\["(https://[^"]+\.avif)"(?:,"(https://[^"]+\.avif)")*\]""")
+            val regex = Regex("""\"images\":\[\"(https://[^\"]+\.avif)\"(?:,\"(https://[^\"]+\.avif)\")*\]""")
             val match = regex.find(html) ?: return emptyList()
-            val arrayContent = match.value.removePrefix("\"\":[").removeSuffix("]")
-            arrayContent.split(",").map { it.trim('"') }.filter { it.startsWith("https://") }
+            val arrayContent = match.value.removePrefix("\"images\":[\"").removeSuffix("\"]")
+            arrayContent.split("\",\"").map { it.trim('\"') }.filter { it.startsWith("https://") }
         } catch (e: Exception) {
             emptyList()
         }
@@ -724,33 +724,10 @@ class ProChan : HttpSource() {
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
 
-// ✅ توسيع الأنواع المدعومة
+// =================================================================
+// CONSTANTS
+// =================================================================
 private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "comic")
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 private val MOBILE_REGEX = Regex("mobile|android|iphone|ipad|ipod", RegexOption.IGNORE_CASE)
 private val TABLES_REGEX = Regex("tablet", RegexOption.IGNORE_CASE)
-
-// =================================================================
-// DATA CLASSES الجديدة
-// =================================================================
-@Serializable
-data class ScrambledMap(
-    val dim: List<Int> = emptyList(),
-    val mode: String = "",
-    val pieces: List<String> = emptyList(),
-    val order: List<Int> = emptyList(),
-)
-
-@Serializable
-data class ChapterDeferredResponse(
-    val success: Boolean = false,
-    val data: ChapterDeferredData? = null,
-)
-
-@Serializable
-data class ChapterDeferredData(
-    val chapterId: Int = 0,
-    val splitIndex: Int = 0,
-    val images: List<String> = emptyList(),
-    val maps: List<ScrambledMap> = emptyList(),
-)
