@@ -128,7 +128,7 @@ class Series(
             val artist: List<String> = emptyList(),
             val year: String? = null,
             val genres: List<String> = emptyList(),
-            val tags: List<String> = emptySet(),
+            val tags: List<String> = emptyList(),  // ✅ إصلاح: emptyList() بدلاً من emptySet()
             val origin: String? = null,
             val coverImage: String? = null,
         )
@@ -144,7 +144,7 @@ class Series(
  */
 @Serializable
 class InitialChapters(
-    val initialChapters: List<Chapter>,
+    val initialChapters: List<<Chapter>,
     val totalChapters: Int,
 )
 
@@ -203,7 +203,7 @@ class DeferredMediaToken(
 class DeferredImages(
     val images: List<String>,
     @Serializable(ScrambledDataSerializer::class)
-    val maps: List<ScrambledData>,
+    val maps: List<<ScrambledData>,
 )
 
 // =================================================================
@@ -284,7 +284,7 @@ class ChapterDeferredData(
     val chapterId: Int = 0,
     val splitIndex: Int = 0,
     val images: List<String> = emptyList(),
-    val maps: List<ScrambledMap> = emptyList(),
+    val maps: List<<ScrambledMap> = emptyList(),
 )
 
 // =================================================================
@@ -360,7 +360,7 @@ object StringListSerializer : JsonTransformingSerializer<List<String>>(ListSeria
  * Serializer for deferredMedia field that may be a JSON primitive (null)
  * or an object containing a token.
  */
-object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
+object DeferredMediaSerializer : KSerializer<<DeferredMediaToken?> {
     override val descriptor = DeferredMediaToken.serializer().descriptor
 
     override fun deserialize(decoder: Decoder): DeferredMediaToken? {
@@ -385,7 +385,7 @@ object DeferredMediaSerializer : KSerializer<DeferredMediaToken?> {
  * Serializer for ScrambledData list that adds a "type" discriminator
  * based on whether "method" field is present (indirect) or not (direct).
  */
-object ScrambledDataSerializer : JsonTransformingSerializer<List<ScrambledData>>(ListSerializer(ScrambledData.serializer())) {
+object ScrambledDataSerializer : JsonTransformingSerializer<List<<ScrambledData>>(ListSerializer(ScrambledData.serializer())) {
     override fun transformDeserialize(element: JsonElement): JsonElement = JsonArray(
         element.jsonArray.map { jsonElement ->
             val jsonObject = jsonElement.jsonObject
