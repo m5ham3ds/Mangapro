@@ -39,7 +39,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.asResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody  // ✅ إصلاح: استيراد toResponseBody
 import okhttp3.internal.closeQuietly
 import okio.Buffer
 import okio.IOException
@@ -99,14 +99,14 @@ class ProChan : HttpSource() {
     // =================================================================
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 2
+            firstInstance<<SortFilter>().state = 2
         }
         return fetchSearchManga(page, "", filters)
     }
 
     override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
-            firstInstance<SortFilter>().state = 1
+            firstInstance<<SortFilter>().state = 1
         }
         return fetchSearchManga(page, "", filters)
     }
@@ -138,11 +138,11 @@ class ProChan : HttpSource() {
                     throw Exception("HTTP ${response.code}")
                 }
 
-                val statusFilter = filters.firstInstance<StatusFilter>().selected
-                val genreFilter = filters.firstInstance<GenreFilter>()
+                val statusFilter = filters.firstInstance<<StatusFilter>().selected
+                val genreFilter = filters.firstInstance<<GenreFilter>()
                 val tagFilter = filters.firstInstance<TagFilter>()
 
-                val data = response.parseAs<MetaData<BrowseManga>>()
+                val data = response.parseAs<<MetaData<BrowseManga>>()
                 val mangas = data.data.asSequence()
                     .filter { manga -> statusFilter == null || manga.progress == statusFilter }
                     .filter { manga -> genreFilter.included.isEmpty() || manga.metadata.genres.containsAll(genreFilter.included) }
@@ -171,8 +171,8 @@ class ProChan : HttpSource() {
             addQueryParameter("page", page.toString())
             query.takeIf(String::isNotBlank)?.also { addQueryParameter("search", it) }
             filters.firstInstance<TypeFilter>().selected?.also { addQueryParameter("type", it) }
-            addQueryParameter("sort", filters.firstInstance<SortFilter>().selected)
-            filters.firstInstance<YearFilter>().selected?.also { addQueryParameter("year", it) }
+            addQueryParameter("sort", filters.firstInstance<<SortFilter>().selected)
+            filters.firstInstance<<YearFilter>().selected?.also { addQueryParameter("year", it) }
         }.build()
         return GET(url, headers)
     }
@@ -193,7 +193,7 @@ class ProChan : HttpSource() {
             throw Exception("HTTP ${response.code}")
         }
 
-        val manga = response.extractNextJs<Series>()!!.series
+        val manga = response.extractNextJs<<Series>()!!.series
         return SManga.create().apply {
             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
             title = manga.title
@@ -256,7 +256,7 @@ class ProChan : HttpSource() {
             throw Exception("HTTP ${response.code}")
         }
 
-        val data = response.extractNextJs<InitialChapters>()!!
+        val data = response.extractNextJs<<InitialChapters>()!!
         val chapters = data.initialChapters.toMutableList()
         val size = chapters.size
         var page = 2
@@ -274,7 +274,7 @@ class ProChan : HttpSource() {
                 }
                 throw Exception("HTTP ${nextResponse.code} - فشل جلب الصفحة ${page - 1}")
             }
-            val nextChapters = nextResponse.parseAs<Data<List<Chapter>>>()
+            val nextChapters = nextResponse.parseAs<Data<List<<Chapter>>>()
             chapters.addAll(nextChapters.data)
         }
 
@@ -314,11 +314,11 @@ class ProChan : HttpSource() {
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
     override fun getChapterUrl(chapter: SChapter): String {
-        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
+        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<<ChapterUrl>() else chapter.url
         return "$baseUrl$url"
     }
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override fun fetchPageList(chapter: SChapter): Observable<List<<Page>> {
         return Observable.fromCallable {
             val request = pageListRequest(chapter)
             val response = client.newCall(request).execute()
@@ -333,7 +333,7 @@ class ProChan : HttpSource() {
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
+    override fun pageListParse(response: Response): List<<Page> {
         val html = response.body.string()
 
         // ─── استخراج البيانات المضمّنة في HTML أولاً ───
@@ -341,7 +341,7 @@ class ProChan : HttpSource() {
         val embeddedMaps = extractEmbeddedMaps(html)
         val deferredToken = extractDeferredToken(html)
 
-        val pages = mutableListOf<Page>()
+        val pages = mutableListOf<<Page>()
         val existingUrls = mutableSetOf<String>()
         var index = 0
 
@@ -374,7 +374,7 @@ class ProChan : HttpSource() {
         val firstResult = runCatching {
             client.newCall(
                 GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken&split=0", apiHeaders),
-            ).execute().parseAs<ChapterDeferredResponse>()
+            ).execute().parseAs<<ChapterDeferredResponse>()
         }.getOrNull()
 
         if (firstResult?.success != true || firstResult.data == null) return pages
@@ -387,7 +387,7 @@ class ProChan : HttpSource() {
             try {
                 val result = client.newCall(
                     GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken&split=$s", apiHeaders),
-                ).execute().parseAs<ChapterDeferredResponse>()
+                ).execute().parseAs<<ChapterDeferredResponse>()
                 if (result.success && result.data != null) {
                     allSplitData.add(result.data)
                 }
@@ -429,12 +429,12 @@ class ProChan : HttpSource() {
     }
 
     // ─── استخراج Maps المضمّنة في HTML ───
-    private fun extractEmbeddedMaps(html: String): List<ScrambledMap> {
+    private fun extractEmbeddedMaps(html: String): List<<ScrambledMap> {
         return try {
             val mapsRegex = Regex("""\"maps\":\[(\{[^\]]*\}(?:,\{[^\]]*\})*)\]""")
             val match = mapsRegex.find(html) ?: return emptyList()
             val mapsJson = "[${match.groupValues[1]}]"
-            json.decodeFromString<List<ScrambledMap>>(mapsJson)
+            json.decodeFromString<List<<ScrambledMap>>(mapsJson)
         } catch (e: Exception) {
             emptyList()
         }
@@ -456,7 +456,7 @@ class ProChan : HttpSource() {
     // ─── تشفير Map كـ URL للـ Interceptor ───
     private fun encodeMap(map: ScrambledMap): String {
         val encoded = Base64.encodeToString(
-            json.encodeToString(map).toByteArray(Charsets.UTF_8),
+            json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),  // ✅ إصلاح: serializer صريح
             Base64.URL_SAFE or Base64.NO_WRAP,
         )
         return "$SCRAMBLED_SCHEME$encoded"
@@ -482,7 +482,7 @@ class ProChan : HttpSource() {
 
         val encoded = url.removePrefix(SCRAMBLED_SCHEME)
         val mapJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
-        val map = json.decodeFromString<ScrambledMap>(mapJson)
+        val map = json.decodeFromString<<ScrambledMap>(mapJson)
 
         val mergedBytes = reconstructPage(map)
             ?: return Response.Builder()
@@ -490,7 +490,7 @@ class ProChan : HttpSource() {
                 .protocol(Protocol.HTTP_1_1)
                 .code(500)
                 .message("فشل دمج الصورة")
-                .body("".toResponseBody(null))
+                .body("".toResponseBody(null))  // ✅ إصلاح: toResponseBody مستورد
                 .build()
 
         return Response.Builder()
@@ -498,7 +498,7 @@ class ProChan : HttpSource() {
             .protocol(Protocol.HTTP_1_1)
             .code(200)
             .message("OK")
-            .body(mergedBytes.toResponseBody("image/jpeg".toMediaType()))
+            .body(mergedBytes.toResponseBody("image/jpeg".toMediaType()))  // ✅ إصلاح: toResponseBody مستورد
             .build()
     }
 
@@ -512,7 +512,7 @@ class ProChan : HttpSource() {
         if (n == 0) return null
 
         // تحميل جميع القطع بترتيبها الأصلي
-        val rawBitmaps = arrayOfNulls<Bitmap>(n)
+        val rawBitmaps = arrayOfNulls<<Bitmap>(n)
         try {
             for (i in 0 until n) {
                 try {
@@ -628,7 +628,7 @@ class ProChan : HttpSource() {
 
     private fun decodeScrambledImageToken(data: ScrambledImageToken): ScrambledImage {
         val value = String(urlSafeBase64(data.token), Charsets.UTF_8)
-            .parseAs<ScrambledImageTokenValue>()
+            .parseAs<<ScrambledImageTokenValue>()
 
         val iv = urlSafeBase64(value.iv)
         val tag = urlSafeBase64(value.tag)
