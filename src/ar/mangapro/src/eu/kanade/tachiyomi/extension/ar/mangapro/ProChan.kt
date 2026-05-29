@@ -8,7 +8,6 @@ import android.util.Base64
 import android.util.Log
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -23,10 +22,6 @@ import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -41,7 +36,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.internal.closeQuietly
-import okio.Buffer
 import okio.IOException
 import rx.Observable
 import tachiyomi.decoder.ImageDecoder
@@ -65,11 +59,9 @@ class ProChan : HttpSource() {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    // =================================================================
-    // SCRAMBLED IMAGE INTERCEPTOR
-    // =================================================================
     companion object {
-        private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
+        private const val SCRAMBLED_IMAGE_HOST = "procomic.net/__scrambled__"
+        private const val SCRAMBLED_SCHEME = "https://$SCRAMBLED_IMAGE_HOST/"
     }
 
     override val client = network.cloudflareClient.newBuilder()
@@ -85,12 +77,10 @@ class ProChan : HttpSource() {
         )
         .build()
 
-    override fun headersBuilder(): okhttp3.Headers.Builder {
-        return super.headersBuilder()
-            .set("Referer", "$baseUrl/")
-            .set("Origin", baseUrl)
-            .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
-    }
+    override fun headersBuilder() = super.headersBuilder()
+        .set("Referer", "$baseUrl/")
+        .set("Origin", baseUrl)
+        .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
 
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
@@ -311,7 +301,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST — الإصلاح الجوهري
+    // PAGE LIST — باستخدام extractNextJsRsc (الأصل)
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -336,132 +326,56 @@ class ProChan : HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val html = response.body.string()
+        val responseBody = response.body.string()
+        val imageData = responseBody.extractNextJsRsc<Images>()
 
-        // ─── استخراج البيانات المضمّنة في HTML أولاً ───
-        val embeddedImages = extractEmbeddedImages(html)
-        val embeddedMaps = extractEmbeddedMaps(html)
-        val deferredToken = extractDeferredToken(html)
-
-        val pages = mutableListOf<Page>()
-        val existingUrls = mutableSetOf<String>()
-        var index = 0
-
-        // ✅ إصلاح 1: الصور الأولى المضمّنة في HTML (لا تُهمل!)
-        embeddedImages.forEach { url ->
-            pages.add(Page(index++, imageUrl = url))
-            existingUrls.add(url)
+        if (imageData == null) {
+            val coins = responseBody.extractNextJsRsc<Coins>()?.coins
+            if (coins != null && coins > 0) {
+                throw Exception("فصل مدفوع")
+            } else {
+                return emptyList()
+            }
         }
 
-        // ✅ إصلاح 2: Maps المضمّنة في HTML
-        embeddedMaps.forEach { map ->
-            if (map.pieces.isEmpty()) return@forEach
-            val encoded = encodeMap(map)
-            pages.add(Page(index++, imageUrl = encoded))
-            existingUrls.add(map.pieces.first())
-        }
-
-        // إذا لا يوجد token → نعيد ما وجدناه فقط
-        if (deferredToken == null) return pages
-
-        // ─── جلب الصفحات المؤجلة ───
-        val chapterId = response.request.url.pathSegments[4]
         val seriesId = response.request.url.pathSegments[2]
+        val chapterId = response.request.url.pathSegments[4]
 
-        val apiHeaders = headers.newBuilder()
-            .set("Accept", "application/json")
-            .set("Referer", response.request.url.toString())
-            .build()
+        val images = imageData.images.toMutableList()
+        val maps = mutableListOf<ScrambledData>()
 
-        val firstResult = runCatching {
-            client.newCall(
-                GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken&split=0", apiHeaders),
-            ).execute().parseAs<ChapterDeferredResponse>()
-        }.getOrNull()
+        if (imageData.deferredMedia != null) {
+            val deferredUrl = baseUrl.toHttpUrl().newBuilder()
+                .addPathSegment("chapter-deferred-media")
+                .addPathSegment(chapterId)
+                .addQueryParameter("token", imageData.deferredMedia.token)
+                .build()
 
-        if (firstResult?.success != true || firstResult.data == null) return pages
-
-        val splitIndex = firstResult.data.splitIndex
-        val allSplitData = mutableListOf(firstResult.data)
-
-        // ✅ إصلاح 3: جلب جميع الـ splits (0..splitIndex)
-        for (s in 1..splitIndex) {
-            try {
-                val result = client.newCall(
-                    GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken&split=$s", apiHeaders),
-                ).execute().parseAs<ChapterDeferredResponse>()
-                if (result.success && result.data != null) {
-                    allSplitData.add(result.data)
-                }
-            } catch (e: Exception) {
-                break
+            val deferredResponse = client.newCall(GET(deferredUrl, headers)).execute()
+            if (!deferredResponse.isSuccessful) {
+                val code = deferredResponse.code
+                val body = deferredResponse.body.string().take(200)
+                deferredResponse.close()
+                throw Exception("HTTP $code - فشل جلب الصور المؤجلة: $body")
             }
-        }
-
-        // ✅ إصلاح 4: Deduplication لتجنب الصور المكررة
-        for (splitData in allSplitData) {
-            splitData.images.forEach { url ->
-                if (existingUrls.add(url)) {
-                    pages.add(Page(index++, imageUrl = url))
-                }
-            }
-            splitData.maps.forEach { map ->
-                if (map.pieces.isEmpty()) return@forEach
-                val key = map.pieces.first()
-                if (existingUrls.add(key)) {
-                    pages.add(Page(index++, imageUrl = encodeMap(map)))
-                }
-            }
+            val deferredImages = deferredResponse.parseAs<Data<DeferredImages>>()
+            images.addAll(deferredImages.data.images)
+            maps.addAll(deferredImages.data.maps)
         }
 
         countViews(seriesId, chapterId)
+
+        val chapterUrl = response.request.url.toString()
+        val pages = mutableListOf<Page>()
+
+        images.mapIndexedTo(pages) { index, imageUrl ->
+            Page(index, chapterUrl, imageUrl)
+        }
+        maps.mapIndexedTo(pages) { index, scrambledData ->
+            Page(pages.size + index, chapterUrl, "$SCRAMBLED_SCHEME#${scrambledData.toJsonString()}")
+        }
+
         return pages
-    }
-
-    // ─── استخراج الصور الأولى من HTML ───
-    private fun extractEmbeddedImages(html: String): List<String> {
-        return try {
-            val regex = Regex("""\"images\":\[\"(https://[^\"]+\.avif)\"(?:,\"(https://[^\"]+\.avif)\")*\]""")
-            val match = regex.find(html) ?: return emptyList()
-            val arrayContent = match.value.removePrefix("\"images\":[\"").removeSuffix("\"]")
-            arrayContent.split("\",\"").map { it.trim('\"') }.filter { it.startsWith("https://") }
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    // ─── استخراج Maps المضمّنة في HTML ───
-    private fun extractEmbeddedMaps(html: String): List<ScrambledMap> {
-        return try {
-            val mapsRegex = Regex("""\"maps\":\[(\{[^\]]*\}(?:,\{[^\]]*\})*)\]""")
-            val match = mapsRegex.find(html) ?: return emptyList()
-            val mapsJson = "[${match.groupValues[1]}]"
-            json.decodeFromString<List<ScrambledMap>>(mapsJson)
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    // ─── استخراج deferred token من HTML ───
-    private fun extractDeferredToken(html: String): String? {
-        val deferredRegex = Regex("""\"deferredMedia\":\{\"token\":\"([^\"]+)\"""")
-        val deferredMatch = deferredRegex.find(html)
-        if (deferredMatch != null) return deferredMatch.groupValues[1]
-
-        // Fallback: البحث عن JWT مباشرة
-        val jwtRegex = Regex(
-            """eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+""",
-        )
-        return jwtRegex.find(html)?.value
-    }
-
-    // ─── تشفير Map كـ URL للـ Interceptor ───
-    private fun encodeMap(map: ScrambledMap): String {
-        val encoded = Base64.encodeToString(
-            json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),
-            Base64.URL_SAFE or Base64.NO_WRAP,
-        )
-        return "$SCRAMBLED_SCHEME$encoded"
     }
 
     override fun imageRequest(page: Page): Request {
@@ -472,7 +386,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // SCRAMBLED IMAGE INTERCEPTOR — الإصلاح الجوهري
+    // SCRAMBLED IMAGE INTERCEPTOR
     // =================================================================
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -482,8 +396,8 @@ class ProChan : HttpSource() {
             return chain.proceed(request)
         }
 
-        val encoded = url.removePrefix(SCRAMBLED_SCHEME)
-        val mapJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+        val fragment = request.url.fragment ?: return chain.proceed(request)
+        val mapJson = fragment.substringAfter('#')
         val map = json.decodeFromString<ScrambledMap>(mapJson)
 
         val mergedBytes = reconstructPage(map)
@@ -505,7 +419,7 @@ class ProChan : HttpSource() {
     }
 
     // ════════════════════════════════════════════════════════
-    // IMAGE RECONSTRUCTION — الإصلاح الجوهري
+    // IMAGE RECONSTRUCTION
     // ════════════════════════════════════════════════════════
     private fun reconstructPage(map: ScrambledMap): ByteArray? {
         val totalW = map.dim.getOrElse(0) { 800 }
@@ -513,7 +427,6 @@ class ProChan : HttpSource() {
         val n = map.pieces.size
         if (n == 0) return null
 
-        // تحميل جميع القطع بترتيبها الأصلي
         val rawBitmaps = arrayOfNulls<Bitmap>(n)
         try {
             for (i in 0 until n) {
@@ -532,9 +445,6 @@ class ProChan : HttpSource() {
                 } catch (_: Exception) {}
             }
 
-            // ✅ الإصلاح الجوهري: الترتيب الصحيح
-            // order[pos] = sourceIndex
-            // orderedBitmaps[pos] = rawBitmaps[order[pos]]
             val orderedBitmaps = Array(n) { pos ->
                 rawBitmaps.getOrNull(map.order.getOrElse(pos) { pos })
             }
@@ -546,7 +456,6 @@ class ProChan : HttpSource() {
             val canvas: Canvas
 
             if (isVertical) {
-                // ✅ الإصلاح: كل قطعة بارتفاعها الحقيقي (dim[1] قد يكون 8000 لكن الارتفاع الفعلي أقل)
                 val actualH = orderedBitmaps.filterNotNull().sumOf { it.height }
                 val canvasH = if (actualH > 0) actualH else totalH
                 result = Bitmap.createBitmap(totalW, canvasH, Bitmap.Config.ARGB_8888)
@@ -558,7 +467,6 @@ class ProChan : HttpSource() {
                     yOffset += bmp.height
                 }
             } else {
-                // grid_ColsxRows
                 result = Bitmap.createBitmap(totalW, totalH, Bitmap.Config.ARGB_8888)
                 canvas = Canvas(result)
                 for (pos in 0 until (cols * rows)) {
@@ -623,7 +531,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // TOKEN DECRYPTION (للـ scrambled images القديمة إن وجدت)
+    // TOKEN DECRYPTION
     // =================================================================
     private val sessionKey = ConcurrentHashMap<Int, Pair<String, Long>>()
     private val sessionKeyLock = Any()
