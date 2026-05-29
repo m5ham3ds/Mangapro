@@ -471,7 +471,7 @@ class ProChan : HttpSource() {
             value.m == "browser" && value.v == 2 -> {
                 val hash = MessageDigest.getInstance("SHA-256")
                     .digest(
-                        "procomic-browser-map:2e6f9a1c4d8b7e3f0a5c9d2b6e1f4a8c7d3b0e6a9f2c5d8b1e4a7c0d3f6b9e2:${value.cid}"
+                        "prochan-browser-map:2e6f9a1c4d8b7e3f0a5c9d2b6e1f4a8c7d3b0e6a9f2c5d8b1e4a7c0d3f6b9e2:${value.cid}"
                             .toByteArray(Charsets.UTF_8),
                     )
                 SecretKeySpec(hash, "AES")
