@@ -58,7 +58,8 @@ class ProChan : HttpSource() {
     override val supportsLatest = true
     override val versionId = 6
 
-    override val client = network.client.newBuilder()
+    // IMPORTANT: Use cloudflareClient to handle Cloudflare challenges and cf_clearance cookies
+    override val client = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
             CookieInterceptor(
@@ -479,15 +480,12 @@ class ProChan : HttpSource() {
                 val time = System.currentTimeMillis()
                 val key = sessionKey[value.cid]?.takeIf { it.second > time }?.first ?: run {
                     val request = GET("$baseUrl/chapter-map-session-key/${value.cid}", headers)
-
                     val response = client.newCall(request).execute()
-
                     if (!response.isSuccessful) {
                         val code = response.code
                         response.close()
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة")
                     }
-
                     val keyData = response.parseAs<Data<Key>>()
                     sessionKey[value.cid] = keyData.data.key to (time + 120000)
                     keyData.data.key
