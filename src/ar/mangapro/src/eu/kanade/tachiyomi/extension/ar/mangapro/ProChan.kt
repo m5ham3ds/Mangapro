@@ -38,7 +38,6 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.internal.closeQuietly
 import okio.Buffer
-import okio.decodeBase64
 import okio.IOException
 import rx.Observable
 import tachiyomi.decoder.ImageDecoder
@@ -508,8 +507,7 @@ class ProChan : HttpSource() {
     }
 
     private fun urlSafeBase64(data: String): ByteArray {
-        return data.decodeBase64()?.toByteArray()
-            ?: throw IllegalArgumentException("Invalid base64: $data")
+        return android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
     }
 
     private fun countViews(seriesId: String, chapterId: String? = null) {
