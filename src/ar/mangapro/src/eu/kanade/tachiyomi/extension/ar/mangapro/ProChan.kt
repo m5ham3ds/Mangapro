@@ -1,12 +1,9 @@
 package eu.kanade.tachiyomi.extension.ar.mangapro
 
-import android.app.Activity
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Rect
-import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import eu.kanade.tachiyomi.network.GET
@@ -124,11 +121,7 @@ class ProChan : HttpSource() {
             response.use {
                 if (!response.isSuccessful) {
                     if (response.code == 403) {
-                        val body = response.body?.string() ?: ""
-                        if (body.contains("Turnstile") || body.contains("cf_chl")) {
-                            throw WebViewRequiredException("يتطلب تحديث الجلسة", "$baseUrl/")
-                        }
-                        throw Exception("HTTP 403 - تم حظر الوصول. افتح WebView أولاً.")
+                        throw Exception("تم حظر الوصول (HTTP 403). افتح الامتداد في WebView من الإعدادات، وتصفح الموقع قليلاً، ثم حاول مرة أخرى.")
                     }
                     throw Exception("HTTP ${response.code}")
                 }
@@ -155,12 +148,6 @@ class ProChan : HttpSource() {
                     }.toList()
 
                 MangasPage(mangas, data.meta.hasNextPage())
-            }
-        }.onErrorResumeNext { throwable ->
-            if (throwable is WebViewRequiredException) {
-                openWebViewAndRetry(throwable.urlToOpen, throwable.message ?: "تحديث الجلسة")
-            } else {
-                Observable.error(throwable)
             }
         }
     }
@@ -191,11 +178,7 @@ class ProChan : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga {
         if (!response.isSuccessful) {
             if (response.code == 403) {
-                val body = response.body?.string() ?: ""
-                if (body.contains("Turnstile") || body.contains("cf_chl")) {
-                    throw WebViewRequiredException("يتطلب تحديث الجلسة", getMangaUrl(mangaFromResponse(response)))
-                }
-                throw Exception("HTTP 403 - تم حظر الوصول. افتح WebView أولاً.")
+                throw Exception("تم حظر الوصول (HTTP 403). افتح الامتداد في WebView من الإعدادات، وتصفح الموقع، ثم حاول مرة أخرى.")
             }
             throw Exception("HTTP ${response.code}")
         }
@@ -252,10 +235,6 @@ class ProChan : HttpSource() {
         }
     }
 
-    private fun mangaFromResponse(response: Response): SManga {
-        return SManga.create().apply { url = response.request.url.toString() }
-    }
-
     // =================================================================
     // CHAPTER LIST
     // =================================================================
@@ -264,11 +243,7 @@ class ProChan : HttpSource() {
     override fun chapterListParse(response: Response): List<SChapter> {
         if (!response.isSuccessful) {
             if (response.code == 403) {
-                val body = response.body?.string() ?: ""
-                if (body.contains("Turnstile") || body.contains("cf_chl")) {
-                    throw WebViewRequiredException("يتطلب تحديث الجلسة", response.request.url.toString())
-                }
-                throw Exception("HTTP 403 - تم حظر الوصول. افتح WebView أولاً.")
+                throw Exception("تم حظر الوصول (HTTP 403). افتح الامتداد في WebView من الإعدادات، وتصفح الموقع، ثم حاول مرة أخرى.")
             }
             throw Exception("HTTP ${response.code}")
         }
@@ -287,7 +262,7 @@ class ProChan : HttpSource() {
             if (!nextResponse.isSuccessful) {
                 nextResponse.close()
                 if (nextResponse.code == 403) {
-                    throw WebViewRequiredException("يتطلب تحديث الجلسة عند جلب الفصول", response.request.url.toString())
+                    throw Exception("تم حظر الوصول (HTTP 403) عند جلب الفصول. افتح WebView أولاً.")
                 }
                 throw Exception("HTTP ${nextResponse.code} - فشل جلب الصفحة ${page - 1}")
             }
@@ -326,7 +301,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST مع إعادة المحاولة بعد WebView
+    // PAGE LIST
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -342,17 +317,11 @@ class ProChan : HttpSource() {
             if (!response.isSuccessful) {
                 response.close()
                 if (response.code == 403) {
-                    throw WebViewRequiredException("يتطلب تحديث الجلسة لفتح الفصل", getChapterUrl(chapter))
+                    throw Exception("تم حظر الوصول (HTTP 403). افتح الامتداد في WebView من الإعدادات، وتصفح الموقع (افتح هذا الفصل يدوياً في المتصفح)، ثم حاول مرة أخرى.")
                 }
                 throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
             }
             pageListParse(response)
-        }.onErrorResumeNext { throwable ->
-            if (throwable is WebViewRequiredException) {
-                openWebViewAndRetry(throwable.urlToOpen, throwable.message ?: "تحديث الجلسة")
-            } else {
-                Observable.error(throwable)
-            }
         }
     }
 
@@ -443,13 +412,12 @@ class ProChan : HttpSource() {
                         }
                     }
                 } else if (deferredResponse.code == 403) {
-                    throw WebViewRequiredException("يتطلب تحديث الجلسة للصور المؤجلة", chapterUrl)
+                    throw Exception("فشل جلب الصور المؤجلة (HTTP 403). افتح الفصل في WebView أولاً.")
                 }
                 deferredResponse.close()
-            } catch (e: WebViewRequiredException) {
-                throw e
             } catch (e: Exception) {
                 Log.e(name, "فشل جلب الصور المؤجلة", e)
+                throw e
             }
         }
 
@@ -679,7 +647,7 @@ class ProChan : HttpSource() {
                         val code = response.code
                         response.close()
                         if (code == 403) {
-                            throw WebViewRequiredException("يتطلب تحديث الجلسة للحصول على مفتاح الصورة", "$baseUrl/chapter-map-session-key/${value.cid}")
+                            throw Exception("تم حظر الوصول (HTTP 403) عند جلب مفتاح الجلسة. افتح WebView أولاً.")
                         }
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة")
                     }
@@ -738,37 +706,8 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // WEBVIEW OPENING AND RETRY MECHANISM
+    // UNSUPPORTED METHODS
     // =================================================================
-    private fun openWebViewAndRetry(urlToOpen: String, reason: String): Observable<Nothing> {
-        return Observable.create { subscriber ->
-            val activity = (subscriber as? rx.android.schedulers.AndroidSchedulers)?.getValue() as? Activity
-                ?: throw Exception("لا يمكن فتح WebView: النشاط غير متاح")
-            val intent = Intent(activity, WebViewActivity::class.java).apply {
-                putExtra("url", urlToOpen)
-                putExtra("reason", reason)
-            }
-            activity.startActivityForResult(intent, WEBVIEW_REQUEST_CODE)
-            // انتظر النتيجة (سيتم استدعاؤها عبر onActivityResult)
-            subscriber.onError(Exception("تم فتح WebView، أعد المحاولة بعد إغلاقه"))
-        }
-    }
-
-    // يجب إضافة هذه الدالة في النشاط الرئيسي (غير موجودة هنا، لكنها نموذجية)
-    // نعتمد على أن Tachiyomi يدعم فتح WebView عبر extension API
-    // بدلاً من ذلك، نستخدم الطريقة القياسية لـ HttpSource:
-    override fun openWebView(activity: Activity, url: String): Boolean {
-        val intent = Intent(activity, WebViewActivity::class.java).apply {
-            putExtra("url", url)
-        }
-        activity.startActivity(intent)
-        return true
-    }
-
-    companion object {
-        const val WEBVIEW_REQUEST_CODE = 1001
-    }
-
     override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
     override fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
     override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
@@ -776,8 +715,6 @@ class ProChan : HttpSource() {
     override fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
-
-private class WebViewRequiredException(message: String, val urlToOpen: String) : Exception(message)
 
 private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "comic")
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
