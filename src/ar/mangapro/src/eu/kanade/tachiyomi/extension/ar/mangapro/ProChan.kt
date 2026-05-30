@@ -17,7 +17,6 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.utils.extractNextJs
-import keiyoushi.utils.extractNextJsRsc
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
@@ -122,7 +121,11 @@ class ProChan : HttpSource() {
             response.use {
                 if (!response.isSuccessful) {
                     if (response.code == 403) {
-                        throw Exception("تم حظر الوصول بواسطة Cloudflare. جرب فتح الموقع في WebView أولاً.")
+                        val body = response.body?.string() ?: ""
+                        if (body.contains("Turnstile") || body.contains("cf_chl")) {
+                            throw Exception("طلب الموقع حل تحدي Turnstile. افتح الفصل في WebView أولاً ثم حاول مرة أخرى.")
+                        }
+                        throw Exception("تم حظر الوصول بواسطة Cloudflare (HTTP 403). جرب فتح الموقع في WebView.")
                     }
                     throw Exception("HTTP ${response.code}")
                 }
@@ -178,7 +181,13 @@ class ProChan : HttpSource() {
 
     override fun mangaDetailsParse(response: Response): SManga {
         if (!response.isSuccessful) {
-            if (response.code == 403) throw Exception("تم حظر الوصول بواسطة Cloudflare")
+            if (response.code == 403) {
+                val body = response.body?.string() ?: ""
+                if (body.contains("Turnstile")) {
+                    throw Exception("يتطلب الموقع حل تحدي. افتح المانجا في WebView أولاً.")
+                }
+                throw Exception("تم حظر الوصول بواسطة Cloudflare (HTTP 403).")
+            }
             throw Exception("HTTP ${response.code}")
         }
 
@@ -241,7 +250,13 @@ class ProChan : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         if (!response.isSuccessful) {
-            if (response.code == 403) throw Exception("تم حظر الوصول بواسطة Cloudflare")
+            if (response.code == 403) {
+                val body = response.body?.string() ?: ""
+                if (body.contains("Turnstile")) {
+                    throw Exception("يتطلب الموقع حل تحدي. افتح السلسلة في WebView أولاً.")
+                }
+                throw Exception("تم حظر الوصول بواسطة Cloudflare (HTTP 403).")
+            }
             throw Exception("HTTP ${response.code}")
         }
 
@@ -298,7 +313,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST — النسخة المستقرة (تعمل كما كانت سابقاً مع تحسينات)
+    // PAGE LIST — معالجة 403 وتحسين استخراج البيانات
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -314,7 +329,7 @@ class ProChan : HttpSource() {
             if (!response.isSuccessful) {
                 response.close()
                 if (response.code == 403) {
-                    throw Exception("تم حظر الوصول بواسطة Cloudflare. جرب فتح الموقع في WebView أولاً.")
+                    throw Exception("يتطلب الموقع حل تحدي Cloudflare. افتح الفصل في WebView أولاً ثم حاول مرة أخرى.")
                 }
                 throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
             }
@@ -328,8 +343,8 @@ class ProChan : HttpSource() {
         val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
 
-        // 1. استخراج الصور المباشرة (أي صيغة)
-        val embeddedImages = extractAllImages(html)
+        // 1. استخراج جميع الصور مباشرة من HTML (أكثر شمولية)
+        val allImageUrls = extractAllImageUrls(html)
         // 2. استخراج الـ maps المضمنة
         val embeddedMaps = extractEmbeddedMaps(html)
         // 3. استخراج الـ deferred token
@@ -339,8 +354,8 @@ class ProChan : HttpSource() {
         val existingUrls = mutableSetOf<String>()
         var index = 0
 
-        // إضافة الصور المباشرة
-        embeddedImages.forEach { url ->
+        // إضافة الصور المباشرة (قد تكون فارغة أحياناً)
+        allImageUrls.forEach { url ->
             pages.add(Page(index++, chapterUrl, url))
             existingUrls.add(url)
         }
@@ -354,7 +369,7 @@ class ProChan : HttpSource() {
             }
         }
 
-        // إذا كان هناك token، نجلب الصور المؤجلة (بدون split)
+        // جلب الصور المؤجلة عبر API إذا وجد token
         if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
@@ -362,15 +377,15 @@ class ProChan : HttpSource() {
                 .build()
 
             try {
-                // نحاول جلب البيانات من الـ API بدون أي split
                 val deferredResponse = client.newCall(
                     GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
                 ).execute()
 
                 if (deferredResponse.isSuccessful) {
-                    // نحاول تحليل الاستجابة كـ Data<DeferredImages> أولاً (الهيكل الأصلي)
+                    val bodyString = deferredResponse.body.string()
+                    // حاول التحليل كـ Data<DeferredImages> أولاً
                     try {
-                        val deferredData = deferredResponse.parseAs<Data<DeferredImages>>()
+                        val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
                         deferredData.data.images.forEach { url ->
                             if (existingUrls.add(url)) {
                                 pages.add(Page(index++, chapterUrl, url))
@@ -400,8 +415,7 @@ class ProChan : HttpSource() {
                             }
                         }
                     } catch (e: Exception) {
-                        // إذا فشل التحليل كـ Data<DeferredImages>، نحاول كـ ChapterDeferredResponse
-                        val bodyString = deferredResponse.body.string()
+                        // حاول التحليل كـ ChapterDeferredResponse
                         val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
                         if (chapterDeferred.success && chapterDeferred.data != null) {
                             chapterDeferred.data.images.forEach { url ->
@@ -417,6 +431,8 @@ class ProChan : HttpSource() {
                             }
                         }
                     }
+                } else if (deferredResponse.code == 403) {
+                    Log.w(name, "Deferred media request got 403, skipping")
                 }
                 deferredResponse.close()
             } catch (e: Exception) {
@@ -428,29 +444,29 @@ class ProChan : HttpSource() {
         return pages
     }
 
-    // استخراج جميع الصور بأي امتداد من الـ HTML
-    private fun extractAllImages(html: String): List<String> {
-        val imageUrls = mutableListOf<String>()
-        // البحث عن قائمة images
-        val imagesRegex = Regex("\"images\":\\[([^\\]]+)\\]")
-        val match = imagesRegex.find(html) ?: return emptyList()
-        val content = match.groupValues[1]
-        // استخراج كل الروابط بين علامات التنصيص
-        val urlRegex = Regex("\"(https?://[^\"]+)\"")
-        urlRegex.findAll(content).forEach {
-            val url = it.groupValues[1]
-            if (url.contains("/media/") || 
-                url.endsWith(".avif") || url.endsWith(".webp") || 
-                url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png")) {
-                imageUrls.add(url)
+    // استخراج جميع عناوين الصور من HTML بغض النظر عن الامتداد
+    private fun extractAllImageUrls(html: String): List<String> {
+        val urls = mutableSetOf<String>()
+        // البحث عن النمط "images":["url1","url2",...]
+        val imagesBlockRegex = Regex("\"images\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
+        val match = imagesBlockRegex.find(html) ?: return emptyList()
+        val blockContent = match.groupValues[1]
+        // استخراج كل الروابط المحاطة بعلامات تنصيص
+        val urlRegex = Regex("\"((https?:)?//[^\"]+)\"")
+        urlRegex.findAll(blockContent).forEach {
+            var url = it.groupValues[1]
+            if (url.startsWith("//")) url = "https:$url"
+            if (url.startsWith("http") && (url.contains("/media/") || url.endsWith(".avif") || url.endsWith(".webp") ||
+                url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png"))) {
+                urls.add(url)
             }
         }
-        return imageUrls
+        return urls.toList()
     }
 
     private fun extractEmbeddedMaps(html: String): List<ScrambledMap> {
         return try {
-            val mapsRegex = Regex("\"maps\":\\[(\\{.*?\\})\\]")
+            val mapsRegex = Regex("\"maps\"\\s*:\\s*\\[(\\{.*?\\})\\]", RegexOption.DOT_MATCHES_ALL)
             val match = mapsRegex.find(html) ?: return emptyList()
             val mapsJson = "[${match.groupValues[1]}]"
             json.decodeFromString<List<ScrambledMap>>(mapsJson)
@@ -460,12 +476,12 @@ class ProChan : HttpSource() {
     }
 
     private fun extractDeferredToken(html: String): String? {
-        // البحث عن token في deferredMedia
-        val regex1 = Regex("\"deferredMedia\":\\{\"token\":\"([^\"]+)\"")
-        regex1.find(html)?.let { return it.groupValues[1] }
-        // البحث عن JWT مباشرة
-        val regex2 = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
-        return regex2.find(html)?.value
+        val regex = Regex("\"deferredMedia\"\\s*:\\s*\\{\\s*\"token\"\\s*:\\s*\"([^\"]+)\"")
+        val match = regex.find(html)
+        if (match != null) return match.groupValues[1]
+        // بحث عن JWT مباشرة
+        val jwtRegex = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
+        return jwtRegex.find(html)?.value
     }
 
     private fun encodeMap(map: ScrambledMap): String {
