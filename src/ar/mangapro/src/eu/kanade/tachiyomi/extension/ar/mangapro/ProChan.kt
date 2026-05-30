@@ -15,6 +15,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
@@ -52,7 +53,7 @@ class ProChan : HttpSource() {
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 8
+    override val versionId = 9
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -60,17 +61,18 @@ class ProChan : HttpSource() {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
 
-    // إنشاء OkHttpClient بأمان (بدون CookieInterceptor إذا تسبب بمشكلة)
-    override val client: OkHttpClient = try {
-        network.cloudflareClient.newBuilder()
-            .addInterceptor(::scrambledImageInterceptor)
-            .build()
-    } catch (e: Exception) {
-        Log.e("ProChan", "Failed to create cloudflare client, using default", e)
-        OkHttpClient.Builder()
-            .addInterceptor(::scrambledImageInterceptor)
-            .build()
-    }
+    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
+        .addInterceptor(::scrambledImageInterceptor)
+        .addNetworkInterceptor(
+            CookieInterceptor(
+                domain,
+                listOf(
+                    "safe_browsing" to "off",
+                    "language" to "ar",
+                ),
+            ),
+        )
+        .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
@@ -120,7 +122,7 @@ class ProChan : HttpSource() {
             response.use {
                 if (!response.isSuccessful) {
                     if (response.code == 403) {
-                        throw Exception("⚠️ تم حظر الوصول (HTTP 403)\n\n🔧 الحل:\n1. اذهب إلى الإعدادات ← الامتدادات ← ProChan ← افتح WebView\n2. تصفح الموقع وافتح أي فصل حتى تظهر الصور\n3. ارجع إلى هذه القائمة واسحب لأسفل للتحديث\n4. ثم حاول مرة أخرى.")
+                        throw Exception("⚠️ تم حظر الوصول (HTTP 403)\n\n🔧 الحل:\n1. اذهب إلى الإعدادات ← الامتدادات ← ProChan ← افتح WebView\n2. تصفح الموقع وافتح أي فصل حتى تظهر الصور (لتجاوز Cloudflare)\n3. ارجع إلى هذه القائمة واسحب لأسفل للتحديث\n4. ثم حاول مرة أخرى.")
                     }
                     throw Exception("HTTP ${response.code}")
                 }
@@ -334,8 +336,8 @@ class ProChan : HttpSource() {
     override fun pageListParse(response: Response): List<Page> {
         val html = response.body.string()
         val chapterUrl = response.request.url.toString()
-        val seriesId = response.request.url.pathSegments.getOrNull(2) ?: ""
-        val chapterId = response.request.url.pathSegments.getOrNull(4) ?: ""
+        val seriesId = response.request.url.pathSegments[2]
+        val chapterId = response.request.url.pathSegments[4]
 
         val allImageUrls = extractAllImageUrls(html)
         val embeddedMaps = extractEmbeddedMaps(html)
@@ -363,7 +365,7 @@ class ProChan : HttpSource() {
             deferredToken = jwtRegex.find(html)?.value
         }
 
-        if (deferredToken != null && chapterId.isNotEmpty()) {
+        if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
@@ -425,31 +427,9 @@ class ProChan : HttpSource() {
                                         pages.add(Page(index++, chapterUrl, encodeMap(map)))
                                     }
                                 }
-                                val splitIndex = chapterDeferred.data.splitIndex
-                                for (s in 1..splitIndex) {
-                                    val splitResponse = client.newCall(
-                                        GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken&split=$s", apiHeaders)
-                                    ).execute()
-                                    if (splitResponse.isSuccessful) {
-                                        val splitBody = splitResponse.body.string()
-                                        val splitData = json.decodeFromString<ChapterDeferredResponse>(splitBody)
-                                        splitData.data?.images?.forEach { url ->
-                                            if (existingUrls.add(url)) {
-                                                pages.add(Page(index++, chapterUrl, url))
-                                            }
-                                        }
-                                        splitData.data?.maps?.forEach { map ->
-                                            val key = map.pieces.firstOrNull() ?: return@forEach
-                                            if (existingUrls.add(key)) {
-                                                pages.add(Page(index++, chapterUrl, encodeMap(map)))
-                                            }
-                                        }
-                                    }
-                                    splitResponse.close()
-                                }
                             }
                         } catch (ex: Exception) {
-                            Log.w(name, "فشل تحليل استجابة الصور المؤجلة", ex)
+                            Log.w(name, "Failed to parse deferred response", ex)
                         }
                     }
                 } else if (deferredResponse.code == 403) {
@@ -462,9 +442,7 @@ class ProChan : HttpSource() {
             }
         }
 
-        if (seriesId.isNotEmpty() && chapterId.isNotEmpty()) {
-            countViews(seriesId, chapterId)
-        }
+        countViews(seriesId, chapterId)
         return pages
     }
 
