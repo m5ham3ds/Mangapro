@@ -8,4 +8,5 @@ apply plugin: "kei.plugins.extension.legacy"
 dependencies {
     compileOnly("com.github.tachiyomiorg:image-decoder:41c059e540")
     implementation(project(":lib:cookieinterceptor"))
+	implementation("com.squareup.okhttp3:okhttp:4.11.0")
 }
