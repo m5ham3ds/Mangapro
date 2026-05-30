@@ -61,7 +61,6 @@ class ProChan : HttpSource() {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
 
-    // استخدام CookieInterceptor الرسمي من keiyoushi (بدون JavaNetCookieJar)
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -303,7 +302,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST
+    // PAGE LIST — الإصدار الذي يجلب جميع الصور (مباشرة + مؤجلة)
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -333,9 +332,10 @@ class ProChan : HttpSource() {
         val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
 
+        // 1. استخراج الصور المباشرة والمضمنة
         val allImageUrls = extractAllImageUrls(html)
         val embeddedMaps = extractEmbeddedMaps(html)
-        val deferredToken = extractDeferredToken(html)
+        var deferredToken = extractDeferredToken(html)
 
         val pages = mutableListOf<Page>()
         val existingUrls = mutableSetOf<String>()
@@ -354,6 +354,14 @@ class ProChan : HttpSource() {
             }
         }
 
+        // 2. إذا لم نجد token بالطريقة الأولى، نحاول استخراجه من النص كـ JWT أو أي شكل آخر
+        if (deferredToken == null) {
+            // البحث عن أي string يشبه JWT في HTML
+            val jwtRegex = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
+            deferredToken = jwtRegex.find(html)?.value
+        }
+
+        // 3. جلب الصور المؤجلة إذا وجد token
         if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
@@ -361,19 +369,24 @@ class ProChan : HttpSource() {
                 .build()
 
             try {
+                // محاولة جلب جميع الصور المؤجلة (بدون split أولاً)
                 val deferredResponse = client.newCall(
                     GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
                 ).execute()
 
                 if (deferredResponse.isSuccessful) {
                     val bodyString = deferredResponse.body.string()
+                    
+                    // محاولة التحليل كـ Data<DeferredImages> (الهيكل الأصلي)
                     try {
                         val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
+                        // إضافة الصور العادية
                         deferredData.data.images.forEach { url ->
                             if (existingUrls.add(url)) {
                                 pages.add(Page(index++, chapterUrl, url))
                             }
                         }
+                        // معالجة الـ maps (الصور المشفرة)
                         deferredData.data.maps.forEach { scrambledData ->
                             val map = when (scrambledData) {
                                 is ScrambledImage -> ScrambledMap(
@@ -383,13 +396,18 @@ class ProChan : HttpSource() {
                                     order = scrambledData.order
                                 )
                                 is ScrambledImageToken -> {
-                                    val decoded = decodeScrambledImageToken(scrambledData)
-                                    ScrambledMap(
-                                        dim = decoded.dim,
-                                        mode = decoded.mode,
-                                        pieces = decoded.pieces,
-                                        order = decoded.order
-                                    )
+                                    try {
+                                        val decoded = decodeScrambledImageToken(scrambledData)
+                                        ScrambledMap(
+                                            dim = decoded.dim,
+                                            mode = decoded.mode,
+                                            pieces = decoded.pieces,
+                                            order = decoded.order
+                                        )
+                                    } catch (e: Exception) {
+                                        Log.w(name, "فشل فك تشفير ScrambledImageToken", e)
+                                        return@forEach
+                                    }
                                 }
                             }
                             val key = map.pieces.firstOrNull() ?: return@forEach
@@ -398,19 +416,49 @@ class ProChan : HttpSource() {
                             }
                         }
                     } catch (e: Exception) {
-                        val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
-                        if (chapterDeferred.success && chapterDeferred.data != null) {
-                            chapterDeferred.data.images.forEach { url ->
-                                if (existingUrls.add(url)) {
-                                    pages.add(Page(index++, chapterUrl, url))
+                        // إذا فشل التحليل الأول، نحاول كـ ChapterDeferredResponse (الهيكل الجديد مع split)
+                        try {
+                            val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
+                            if (chapterDeferred.success && chapterDeferred.data != null) {
+                                // إضافة الصور العادية
+                                chapterDeferred.data.images.forEach { url ->
+                                    if (existingUrls.add(url)) {
+                                        pages.add(Page(index++, chapterUrl, url))
+                                    }
+                                }
+                                // معالجة الـ maps
+                                chapterDeferred.data.maps.forEach { map ->
+                                    val key = map.pieces.firstOrNull() ?: return@forEach
+                                    if (existingUrls.add(key)) {
+                                        pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                                    }
                                 }
                             }
-                            chapterDeferred.data.maps.forEach { map ->
-                                val key = map.pieces.firstOrNull() ?: return@forEach
-                                if (existingUrls.add(key)) {
-                                    pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                            // إذا كان هناك splitIndex > 0، نجلب باقي الأجزاء
+                            val splitIndex = chapterDeferred.data?.splitIndex ?: 0
+                            for (s in 1..splitIndex) {
+                                val splitResponse = client.newCall(
+                                    GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken&split=$s", apiHeaders)
+                                ).execute()
+                                if (splitResponse.isSuccessful) {
+                                    val splitBody = splitResponse.body.string()
+                                    val splitData = json.decodeFromString<ChapterDeferredResponse>(splitBody)
+                                    splitData.data?.images?.forEach { url ->
+                                        if (existingUrls.add(url)) {
+                                            pages.add(Page(index++, chapterUrl, url))
+                                        }
+                                    }
+                                    splitData.data?.maps?.forEach { map ->
+                                        val key = map.pieces.firstOrNull() ?: return@forEach
+                                        if (existingUrls.add(key)) {
+                                            pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                                        }
+                                    }
                                 }
+                                splitResponse.close()
                             }
+                        } catch (ex: Exception) {
+                            Log.w(name, "فشل تحليل استجابة الصور المؤجلة", ex)
                         }
                     }
                 } else if (deferredResponse.code == 403) {
@@ -456,9 +504,11 @@ class ProChan : HttpSource() {
     }
 
     private fun extractDeferredToken(html: String): String? {
+        // البحث عن token داخل deferredMedia
         val regex = Regex("\"deferredMedia\"\\s*:\\s*\\{\\s*\"token\"\\s*:\\s*\"([^\"]+)\"")
         val match = regex.find(html)
         if (match != null) return match.groupValues[1]
+        // البحث عن JWT في أي مكان
         val jwtRegex = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
         return jwtRegex.find(html)?.value
     }
