@@ -15,6 +15,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
@@ -25,7 +26,6 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.JavaNetCookieJar
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -38,8 +38,6 @@ import okio.IOException
 import rx.Observable
 import tachiyomi.decoder.ImageDecoder
 import java.io.ByteArrayOutputStream
-import java.net.CookieManager
-import java.net.CookiePolicy
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -61,17 +59,20 @@ class ProChan : HttpSource() {
 
     companion object {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
-
-        // CookieManager مشترك بين OkHttp و (نأمل) WebView
-        private val sharedCookieManager = CookieManager().apply {
-            setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-        }
     }
 
-    // إنشاء OkHttpClient مع JavaNetCookieJar لمشاركة الكوكيز
+    // استخدام CookieInterceptor الرسمي من keiyoushi (بدون JavaNetCookieJar)
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .cookieJar(JavaNetCookieJar(sharedCookieManager))
         .addInterceptor(::scrambledImageInterceptor)
+        .addNetworkInterceptor(
+            CookieInterceptor(
+                domain,
+                listOf(
+                    "safe_browsing" to "off",
+                    "language" to "ar",
+                ),
+            ),
+        )
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
@@ -122,7 +123,7 @@ class ProChan : HttpSource() {
             response.use {
                 if (!response.isSuccessful) {
                     if (response.code == 403) {
-                        throw Exception("تم حظر الوصول (HTTP 403).\n\nالرجاء اتباع الخطوات التالية:\n1. اذهب إلى الإعدادات ← الامتدادات ← ProChan ← افتح WebView\n2. تصفح الموقع وافتح أي فصل حتى تظهر الصور (لتجاوز Cloudflare)\n3. ارجع إلى هذه القائمة واسحب لأسفل للتحديث\n4. ثم حاول مرة أخرى.")
+                        throw Exception("⚠️ تم حظر الوصول (HTTP 403)\n\n🔧 الحل:\n1. اذهب إلى الإعدادات ← الامتدادات ← ProChan ← افتح WebView\n2. تصفح الموقع وافتح أي فصل حتى تظهر الصور (لتجاوز Cloudflare)\n3. ارجع إلى هذه القائمة واسحب لأسفل للتحديث\n4. ثم حاول مرة أخرى.")
                     }
                     throw Exception("HTTP ${response.code}")
                 }
@@ -179,7 +180,7 @@ class ProChan : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga {
         if (!response.isSuccessful) {
             if (response.code == 403) {
-                throw Exception("HTTP 403 - تم حظر الوصول.\n\nالرجاء فتح WebView من إعدادات الامتداد، ثم تصفح هذه السلسلة يدوياً، ثم العودة وسحب لأسفل لتحديث التفاصيل.")
+                throw Exception("⚠️ HTTP 403 - تم حظر الوصول\n\n🔧 الحل: افتح WebView من إعدادات الامتداد، تصفح هذه السلسلة يدوياً، ثم ارجع واسحب لأسفل لتحديث التفاصيل.")
             }
             throw Exception("HTTP ${response.code}")
         }
@@ -244,7 +245,7 @@ class ProChan : HttpSource() {
     override fun chapterListParse(response: Response): List<SChapter> {
         if (!response.isSuccessful) {
             if (response.code == 403) {
-                throw Exception("HTTP 403 - تم حظر الوصول.\n\nالرجاء فتح WebView، ثم تصفح هذه السلسلة، ثم العودة وسحب لأسفل لتحديث قائمة الفصول.")
+                throw Exception("⚠️ HTTP 403 - تم حظر الوصول\n\n🔧 الحل: افتح WebView، تصفح هذه السلسلة، ثم ارجع واسحب لأسفل لتحديث قائمة الفصول.")
             }
             throw Exception("HTTP ${response.code}")
         }
@@ -263,7 +264,7 @@ class ProChan : HttpSource() {
             if (!nextResponse.isSuccessful) {
                 nextResponse.close()
                 if (nextResponse.code == 403) {
-                    throw Exception("HTTP 403 - تم حظر الوصول عند جلب الفصول. افتح WebView وتصفح الموقع ثم أعد المحاولة.")
+                    throw Exception("⚠️ HTTP 403 عند جلب الفصول\n\n🔧 الحل: افتح WebView وتصفح الموقع ثم أعد المحاولة.")
                 }
                 throw Exception("HTTP ${nextResponse.code} - فشل جلب الصفحة ${page - 1}")
             }
@@ -318,7 +319,7 @@ class ProChan : HttpSource() {
             if (!response.isSuccessful) {
                 response.close()
                 if (response.code == 403) {
-                    throw Exception("HTTP 403 - فشل جلب الفصل.\n\nالرجاء فتح WebView من إعدادات الامتداد، ثم تصفح هذا الفصل يدوياً حتى تظهر الصور، ثم العودة وسحب لأسفل لتحديث قائمة الفصول، ثم أعد المحاولة.")
+                    throw Exception("⚠️ HTTP 403 - فشل جلب الفصل\n\n🔧 الحل:\n1. افتح WebView من إعدادات الامتداد\n2. اذهب إلى هذا الفصل يدوياً وتصفحه حتى تظهر الصور\n3. ارجع واسحب قائمة الفصول لأسفل للتحديث\n4. ثم حاول مرة أخرى.")
                 }
                 throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
             }
@@ -413,7 +414,7 @@ class ProChan : HttpSource() {
                         }
                     }
                 } else if (deferredResponse.code == 403) {
-                    throw Exception("HTTP 403 - فشل جلب الصور المؤجلة.\n\nالرجاء فتح WebView، ثم تصفح هذا الفصل يدوياً حتى تظهر الصور، ثم العودة وأعد المحاولة.")
+                    throw Exception("⚠️ HTTP 403 - فشل جلب الصور المؤجلة\n\n🔧 الحل: افتح WebView، تصفح هذا الفصل يدوياً حتى تظهر الصور، ثم ارجع وأعد المحاولة.")
                 }
                 deferredResponse.close()
             } catch (e: Exception) {
@@ -648,7 +649,7 @@ class ProChan : HttpSource() {
                         val code = response.code
                         response.close()
                         if (code == 403) {
-                            throw Exception("HTTP 403 - فشل جلب مفتاح الجلسة. الرجاء فتح WebView وتصفح الموقع ثم أعد المحاولة.")
+                            throw Exception("⚠️ HTTP 403 - فشل جلب مفتاح الجلسة\n\n🔧 الحل: افتح WebView وتصفح الموقع ثم أعد المحاولة.")
                         }
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة")
                     }
