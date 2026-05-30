@@ -15,6 +15,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
@@ -25,7 +26,6 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.JavaNetCookieJar
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Request
@@ -37,8 +37,6 @@ import okio.IOException
 import rx.Observable
 import tachiyomi.decoder.ImageDecoder
 import java.io.ByteArrayOutputStream
-import java.net.CookieManager
-import java.net.CookiePolicy
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -60,17 +58,19 @@ class ProChan : HttpSource() {
 
     companion object {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
-
-        // CookieManager مشترك بين WebView و OkHttp
-        private val sharedCookieManager = CookieManager().apply {
-            setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-        }
     }
 
-    // إعداد OkHttpClient مع JavaNetCookieJar لمشاركة الكوكيز
     override val client = network.cloudflareClient.newBuilder()
-        .cookieJar(JavaNetCookieJar(sharedCookieManager))
         .addInterceptor(::scrambledImageInterceptor)
+        .addNetworkInterceptor(
+            CookieInterceptor(
+                domain,
+                listOf(
+                    "safe_browsing" to "off",
+                    "language" to "ar",
+                ),
+            ),
+        )
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
