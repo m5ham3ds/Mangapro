@@ -53,7 +53,7 @@ class ProChan : HttpSource() {
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 9  // تم زيادته لضمان التحديث
+    override val versionId = 10 // زيادة الرنسخة لضمان التحديث
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -309,7 +309,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST (يجلب الصور المباشرة بأمان)
+    // PAGE LIST (النسخة المستقرة – تجلب أول 5 صور، وآمنة)
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -341,13 +341,12 @@ class ProChan : HttpSource() {
 
         val allImageUrls = extractAllImageUrls(html)
         val embeddedMaps = extractEmbeddedMaps(html)
-        var deferredToken = extractDeferredToken(html)
 
         val pages = mutableListOf<Page>()
         val existingUrls = mutableSetOf<String>()
         var index = 0
 
-        // الصور المباشرة (أول 5 صور مثلاً)
+        // الصور المباشرة (أول 5 صور أو جميع الصور المضمنة في HTML)
         allImageUrls.forEach { url ->
             pages.add(Page(index++, chapterUrl, url))
             existingUrls.add(url)
@@ -361,14 +360,8 @@ class ProChan : HttpSource() {
             }
         }
 
-        // البحث عن التوكن إذا لم يوجد
-        if (deferredToken == null) {
-            val jwtRegex = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
-            deferredToken = jwtRegex.find(html)?.value
-        }
-
-        // هنا يمكنك إضافة منطق جلب الصور المؤجلة لاحقًا
-        // حاليًا نكتفي بالصور المباشرة
+        // ملاحظة: هذا الإصدار لا يحاول جلب الصور المؤجلة (deferred)
+        // للحفاظ على الاستقرار. سنضيفها لاحقاً.
 
         countViews(seriesId, chapterId)
         return pages
@@ -402,11 +395,6 @@ class ProChan : HttpSource() {
         }
     }
 
-    private fun extractDeferredToken(html: String): String? {
-        val regex = Regex("\"deferredMedia\"\\s*:\\s*\\{\\s*\"token\"\\s*:\\s*\"([^\"]+)\"")
-        return regex.find(html)?.groupValues?.get(1)
-    }
-
     private fun encodeMap(map: ScrambledMap): String {
         val encoded = Base64.encodeToString(
             json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),
@@ -423,12 +411,15 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // SCRAMBLED IMAGE INTERCEPTOR (باقي دون تغيير)
+    // SCRAMBLED IMAGE INTERCEPTOR
     // =================================================================
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url.toString()
-        if (!url.startsWith(SCRAMBLED_SCHEME)) return chain.proceed(request)
+
+        if (!url.startsWith(SCRAMBLED_SCHEME)) {
+            return chain.proceed(request)
+        }
 
         val encoded = url.removePrefix(SCRAMBLED_SCHEME)
         val mapJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
@@ -436,12 +427,20 @@ class ProChan : HttpSource() {
 
         val mergedBytes = reconstructPage(map)
             ?: return Response.Builder()
-                .request(request).protocol(Protocol.HTTP_1_1).code(500)
-                .message("فشل دمج الصورة").body("".toResponseBody(null)).build()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(500)
+                .message("فشل دمج الصورة")
+                .body("".toResponseBody(null))
+                .build()
 
         return Response.Builder()
-            .request(request).protocol(Protocol.HTTP_1_1).code(200)
-            .message("OK").body(mergedBytes.toResponseBody("image/jpeg".toMediaType())).build()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(mergedBytes.toResponseBody("image/jpeg".toMediaType()))
+            .build()
     }
 
     private fun reconstructPage(map: ScrambledMap): ByteArray? {
@@ -468,9 +467,13 @@ class ProChan : HttpSource() {
                 } catch (_: Exception) {}
             }
 
-            val orderedBitmaps = Array(n) { pos -> rawBitmaps.getOrNull(map.order.getOrElse(pos) { pos }) }
+            val orderedBitmaps = Array(n) { pos ->
+                rawBitmaps.getOrNull(map.order.getOrElse(pos) { pos })
+            }
+
             val (cols, rows) = parseMode(map.mode, n)
             val isVertical = map.mode.startsWith("vertical_")
+
             val result: Bitmap
             val canvas: Canvas
 
@@ -518,17 +521,28 @@ class ProChan : HttpSource() {
             if (decoder != null) {
                 return try {
                     decoder.decode()
-                } catch (e: Exception) { null } finally { decoder.recycle() }
+                } catch (e: Exception) {
+                    null
+                } finally {
+                    decoder.recycle()
+                }
             }
         } catch (_: Exception) {}
-        return try { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) } catch (_: Exception) { null }
+        return try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun parseMode(mode: String, pieceCount: Int): Pair<Int, Int> {
         return when {
             mode.startsWith("grid_") -> {
                 val parts = mode.removePrefix("grid_").split("x")
-                Pair(parts.getOrNull(0)?.toIntOrNull() ?: 1, parts.getOrNull(1)?.toIntOrNull() ?: 1)
+                Pair(
+                    parts.getOrNull(0)?.toIntOrNull() ?: 1,
+                    parts.getOrNull(1)?.toIntOrNull() ?: 1,
+                )
             }
             mode.startsWith("vertical_") -> {
                 val count = mode.removePrefix("vertical_").toIntOrNull() ?: pieceCount
@@ -542,7 +556,9 @@ class ProChan : HttpSource() {
     private val sessionKeyLock = Any()
 
     private fun decodeScrambledImageToken(data: ScrambledImageToken): ScrambledImage {
-        val value = String(urlSafeBase64(data.token), Charsets.UTF_8).parseAs<ScrambledImageTokenValue>()
+        val value = String(urlSafeBase64(data.token), Charsets.UTF_8)
+            .parseAs<ScrambledImageTokenValue>()
+
         val iv = urlSafeBase64(value.iv)
         val tag = urlSafeBase64(value.tag)
         val encryptedData = urlSafeBase64(value.data)
@@ -550,7 +566,10 @@ class ProChan : HttpSource() {
         val key = when {
             value.m == "browser" && value.v == 2 -> {
                 val hash = MessageDigest.getInstance("SHA-256")
-                    .digest("prochan-browser-map:2e6f9a1c4d8b7e3f0a5c9d2b6e1f4a8c7d3b0e6a9f2c5d8b1e4a7c0d3f6b9e2:${value.cid}".toByteArray())
+                    .digest(
+                        "prochan-browser-map:2e6f9a1c4d8b7e3f0a5c9d2b6e1f4a8c7d3b0e6a9f2c5d8b1e4a7c0d3f6b9e2:${value.cid}"
+                            .toByteArray(Charsets.UTF_8),
+                    )
                 SecretKeySpec(hash, "AES")
             }
             value.m == "browser_session" && value.v == 3 -> synchronized(sessionKeyLock) {
@@ -561,6 +580,9 @@ class ProChan : HttpSource() {
                     if (!response.isSuccessful) {
                         val code = response.code
                         response.close()
+                        if (code == 403) {
+                            throw Exception("⚠️ HTTP 403 - فشل جلب مفتاح الجلسة\n\n🔧 الحل: افتح WebView وتصفح الموقع ثم أعد المحاولة.")
+                        }
                         throw Exception("HTTP $code - فشل جلب مفتاح الصورة المشفرة")
                     }
                     val keyData = response.parseAs<Data<Key>>()
@@ -576,17 +598,21 @@ class ProChan : HttpSource() {
             val spec = GCMParameterSpec(128, iv)
             init(Cipher.DECRYPT_MODE, key, spec)
         }
+
         val decryptedBytes = cipher.doFinal(encryptedData + tag)
         return String(decryptedBytes, Charsets.UTF_8).parseAs()
     }
 
-    private fun urlSafeBase64(data: String): ByteArray = android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
+    private fun urlSafeBase64(data: String): ByteArray {
+        return android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
+    }
 
     private fun countViews(seriesId: String, chapterId: String? = null) {
         val userAgent = headers["User-Agent"] ?: return
+        val contentId = seriesId.toIntOrNull() ?: return
         val payload = ViewsDto(
             chapterId = chapterId?.toIntOrNull(),
-            contentId = seriesId.toIntOrNull() ?: return,
+            contentId = contentId,
             deviceType = when {
                 MOBILE_REGEX.containsMatchIn(userAgent) -> "mobile"
                 TABLES_REGEX.containsMatchIn(userAgent) -> "tablet"
@@ -595,17 +621,24 @@ class ProChan : HttpSource() {
             surface = if (chapterId == null) "series" else "chapter"
         ).toJsonString().toRequestBody(JSON_MEDIA_TYPE)
 
-        client.newCall(POST("$baseUrl/api/views", headers, payload)).enqueue(object : Callback {
-            override fun onResponse(call: Call, response: Response) {
-                if (!response.isSuccessful) Log.e(name, "Failed to count views, HTTP ${response.code}")
-                response.closeQuietly()
-            }
-            override fun onFailure(call: Call, e: IOException) = Log.e(name, "Failed to count views", e)
-        })
+        client.newCall(POST("$baseUrl/api/views", headers, payload))
+            .enqueue(
+                object : Callback {
+                    override fun onResponse(call: Call, response: Response) {
+                        if (!response.isSuccessful) {
+                            Log.e(name, "Failed to count views, HTTP ${response.code}")
+                        }
+                        response.closeQuietly()
+                    }
+                    override fun onFailure(call: Call, e: IOException) {
+                        Log.e(name, "Failed to count views", e)
+                    }
+                }
+            )
     }
 
     // =================================================================
-    // UNSUPPORTED
+    // UNSUPPORTED METHODS
     // =================================================================
     override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
     override fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
