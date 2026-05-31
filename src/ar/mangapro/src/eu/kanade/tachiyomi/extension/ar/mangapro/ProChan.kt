@@ -305,84 +305,69 @@ class ProChan : HttpSource() {
     // =================================================================
     // PAGE LIST
     // =================================================================
-    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
-
-    override fun getChapterUrl(chapter: SChapter): String {
-        val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
-        return "$baseUrl$url"
-    }
-
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
-        return Observable.fromCallable {
-            val request = pageListRequest(chapter)
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                response.close()
-                if (response.code == 403) {
-                    throw Exception("⚠️ HTTP 403 - فشل جلب الفصل\n\n🔧 الحل:\n1. افتح WebView من إعدادات الامتداد\n2. اذهب إلى هذا الفصل يدوياً وتصفحه حتى تظهر الصور\n3. ارجع واسحب قائمة الفصول لأسفل للتحديث\n4. ثم حاول مرة أخرى.")
-                }
-                throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
-            }
-            pageListParse(response)
-        }
-    }
-
     override fun pageListParse(response: Response): List<Page> {
-        val html = response.body.string()
-        val chapterUrl = response.request.url.toString()
-        val seriesId = response.request.url.pathSegments[2]
-        val chapterId = response.request.url.pathSegments[4]
+    val html = response.body.string()
+    val chapterUrl = response.request.url.toString()
+    val seriesId = response.request.url.pathSegments.getOrNull(2) ?: ""
+    val chapterId = response.request.url.pathSegments.getOrNull(4) ?: ""
 
-        val allImageUrls = extractAllImageUrls(html)
-        val embeddedMaps = extractEmbeddedMaps(html)
+    val allImageUrls = extractAllImageUrls(html)
+    val embeddedMaps = extractEmbeddedMaps(html)
+
+    val pages = mutableListOf<Page>()
+    val existingUrls = mutableSetOf<String>()
+    var index = 0
+
+    // الصور المباشرة (أول 5 صور غالباً)
+    allImageUrls.forEach { url ->
+        pages.add(Page(index++, chapterUrl, url))
+        existingUrls.add(url)
+    }
+
+    // الخرائط المضمنة (صور مجزأة)
+    embeddedMaps.forEach { map ->
+        if (map.pieces.isNotEmpty()) {
+            val encoded = encodeMap(map)
+            pages.add(Page(index++, chapterUrl, encoded))
+            existingUrls.add(map.pieces.first())
+        }
+    }
+
+    // ============================================================
+    // 🔽 🔽 🔽 ضع الكود الآتي هنا 🔽 🔽 🔽
+    // ============================================================
+    
+    // محاولة جلب الصور المؤجلة (deferred) بشكل آمن - لا نرمي استثناءات
+    try {
         val deferredToken = extractDeferredToken(html)
-
-        val pages = mutableListOf<Page>()
-        val existingUrls = mutableSetOf<String>()
-        var index = 0
-
-        allImageUrls.forEach { url ->
-            pages.add(Page(index++, chapterUrl, url))
-            existingUrls.add(url)
-        }
-
-        embeddedMaps.forEach { map ->
-            if (map.pieces.isNotEmpty()) {
-                val encoded = encodeMap(map)
-                pages.add(Page(index++, chapterUrl, encoded))
-                existingUrls.add(map.pieces.first())
-            }
-        }
-
-        if (deferredToken != null) {
+        if (deferredToken != null && chapterId.isNotEmpty()) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
                 .build()
-
-            try {
-                val deferredResponse = client.newCall(
-                    GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
-                ).execute()
-
-                if (deferredResponse.isSuccessful) {
-                    val bodyString = deferredResponse.body.string()
-                    try {
-                        val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
-                        deferredData.data.images.forEach { url ->
-                            if (existingUrls.add(url)) {
-                                pages.add(Page(index++, chapterUrl, url))
-                            }
+            val deferredResponse = client.newCall(
+                GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
+            ).execute()
+            if (deferredResponse.isSuccessful) {
+                val bodyString = deferredResponse.body.string()
+                try {
+                    // محاولة كـ Data<DeferredImages>
+                    val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
+                    deferredData.data.images.forEach { url ->
+                        if (existingUrls.add(url)) {
+                            pages.add(Page(index++, chapterUrl, url))
                         }
-                        deferredData.data.maps.forEach { scrambledData ->
-                            val map = when (scrambledData) {
-                                is ScrambledImage -> ScrambledMap(
-                                    dim = scrambledData.dim,
-                                    mode = scrambledData.mode,
-                                    pieces = scrambledData.pieces,
-                                    order = scrambledData.order
-                                )
-                                is ScrambledImageToken -> {
+                    }
+                    deferredData.data.maps.forEach { scrambledData ->
+                        val map = when (scrambledData) {
+                            is ScrambledImage -> ScrambledMap(
+                                dim = scrambledData.dim,
+                                mode = scrambledData.mode,
+                                pieces = scrambledData.pieces,
+                                order = scrambledData.order
+                            )
+                            is ScrambledImageToken -> {
+                                try {
                                     val decoded = decodeScrambledImageToken(scrambledData)
                                     ScrambledMap(
                                         dim = decoded.dim,
@@ -390,42 +375,52 @@ class ProChan : HttpSource() {
                                         pieces = decoded.pieces,
                                         order = decoded.order
                                     )
+                                } catch (ex: Exception) {
+                                    return@forEach
                                 }
                             }
-                            val key = map.pieces.firstOrNull() ?: return@forEach
-                            if (existingUrls.add(key)) {
+                        }
+                        val key = map.pieces.firstOrNull()
+                        if (key != null && existingUrls.add(key)) {
+                            pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                        }
+                    }
+                } catch (e: Exception) {
+                    // محاولة كـ ChapterDeferredResponse
+                    try {
+                        val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
+                        chapterDeferred.data?.images?.forEach { url ->
+                            if (existingUrls.add(url)) {
+                                pages.add(Page(index++, chapterUrl, url))
+                            }
+                        }
+                        chapterDeferred.data?.maps?.forEach { map ->
+                            val key = map.pieces.firstOrNull()
+                            if (key != null && existingUrls.add(key)) {
                                 pages.add(Page(index++, chapterUrl, encodeMap(map)))
                             }
                         }
-                    } catch (e: Exception) {
-                        val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
-                        if (chapterDeferred.success && chapterDeferred.data != null) {
-                            chapterDeferred.data.images.forEach { url ->
-                                if (existingUrls.add(url)) {
-                                    pages.add(Page(index++, chapterUrl, url))
-                                }
-                            }
-                            chapterDeferred.data.maps.forEach { map ->
-                                val key = map.pieces.firstOrNull() ?: return@forEach
-                                if (existingUrls.add(key)) {
-                                    pages.add(Page(index++, chapterUrl, encodeMap(map)))
-                                }
-                            }
-                        }
+                    } catch (ex: Exception) {
+                        // فشل التحليل – نكتفي بما لدينا
                     }
-                } else if (deferredResponse.code == 403) {
-                    throw Exception("⚠️ HTTP 403 - فشل جلب الصور المؤجلة\n\n🔧 الحل: افتح WebView، تصفح هذا الفصل يدوياً حتى تظهر الصور، ثم ارجع وأعد المحاولة.")
                 }
-                deferredResponse.close()
-            } catch (e: Exception) {
-                Log.e(name, "فشل جلب الصور المؤجلة", e)
-                throw e
             }
+            deferredResponse.close()
         }
-
-        countViews(seriesId, chapterId)
-        return pages
+    } catch (e: Exception) {
+        // أي خطأ في جلب الصور المؤجلة لا يؤثر على الصور الموجودة
+        Log.e(name, "فشل جلب الصور المؤجلة (سيتم تجاهل هذا الخطأ)", e)
     }
+
+    // ============================================================
+    // 🔼 🔼 🔼 انتهى الكود المضاف 🔼 🔼 🔼
+    // ============================================================
+
+    if (seriesId.isNotEmpty()) {
+        countViews(seriesId, chapterId.ifEmpty { null })
+    }
+    return pages
+}
 
     private fun extractAllImageUrls(html: String): List<String> {
         val urls = mutableSetOf<String>()
