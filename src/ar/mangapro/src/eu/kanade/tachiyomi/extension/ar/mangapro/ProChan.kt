@@ -318,13 +318,11 @@ class ProChan : HttpSource() {
     val existingUrls = mutableSetOf<String>()
     var index = 0
 
-    // الصور المباشرة (أول 5 صور غالباً)
     allImageUrls.forEach { url ->
         pages.add(Page(index++, chapterUrl, url))
         existingUrls.add(url)
     }
 
-    // الخرائط المضمنة (صور مجزأة)
     embeddedMaps.forEach { map ->
         if (map.pieces.isNotEmpty()) {
             val encoded = encodeMap(map)
@@ -333,11 +331,7 @@ class ProChan : HttpSource() {
         }
     }
 
-    // ============================================================
-    // 🔽 🔽 🔽 ضع الكود الآتي هنا 🔽 🔽 🔽
-    // ============================================================
-    
-    // محاولة جلب الصور المؤجلة (deferred) بشكل آمن - لا نرمي استثناءات
+    // محاولة جلب الصور المؤجلة (deferred) بشكل آمن
     try {
         val deferredToken = extractDeferredToken(html)
         if (deferredToken != null && chapterId.isNotEmpty()) {
@@ -351,7 +345,6 @@ class ProChan : HttpSource() {
             if (deferredResponse.isSuccessful) {
                 val bodyString = deferredResponse.body.string()
                 try {
-                    // محاولة كـ Data<DeferredImages>
                     val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
                     deferredData.data.images.forEach { url ->
                         if (existingUrls.add(url)) {
@@ -386,7 +379,6 @@ class ProChan : HttpSource() {
                         }
                     }
                 } catch (e: Exception) {
-                    // محاولة كـ ChapterDeferredResponse
                     try {
                         val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
                         chapterDeferred.data?.images?.forEach { url ->
@@ -401,27 +393,21 @@ class ProChan : HttpSource() {
                             }
                         }
                     } catch (ex: Exception) {
-                        // فشل التحليل – نكتفي بما لدينا
+                        // تجاهل
                     }
                 }
             }
             deferredResponse.close()
         }
     } catch (e: Exception) {
-        // أي خطأ في جلب الصور المؤجلة لا يؤثر على الصور الموجودة
-        Log.e(name, "فشل جلب الصور المؤجلة (سيتم تجاهل هذا الخطأ)", e)
+        Log.e(name, "فشل جلب الصور المؤجلة", e)
     }
-
-    // ============================================================
-    // 🔼 🔼 🔼 انتهى الكود المضاف 🔼 🔼 🔼
-    // ============================================================
 
     if (seriesId.isNotEmpty()) {
         countViews(seriesId, chapterId.ifEmpty { null })
     }
     return pages
 }
-    }
 
     private fun extractAllImageUrls(html: String): List<String> {
         val urls = mutableSetOf<String>()
