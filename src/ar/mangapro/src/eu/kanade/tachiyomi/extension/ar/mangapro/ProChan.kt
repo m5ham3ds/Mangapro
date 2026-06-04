@@ -327,13 +327,53 @@ class ProChan : HttpSource() {
         }
     }
 
+    // دوال مساعدة لاستخراج الصور المؤجلة والنصوص البرمجية
+    private fun extractLazyImagesFromHtml(html: String): List<String> {
+        val imageUrls = mutableSetOf<String>()
+        // البحث عن وسوم img تحتوي على data-src أو data-lazy-src
+        val imgRegex = Regex("<img[^>]+(data-(?:lazy-)?src)=(?:'|\")([^'\"]+)(?:'|\")", RegexOption.IGNORE_CASE)
+        imgRegex.findAll(html).forEach { match ->
+            var url = match.groupValues[2]
+            if (url.startsWith("//")) url = "https:$url"
+            if (url.startsWith("http")) imageUrls.add(url)
+        }
+        return imageUrls.toList()
+    }
+
+    private fun extractImagesFromJavaScript(html: String): List<String> {
+        val scriptRegex = Regex("<script[^>]*>([\\s\\S]*?)</script>", RegexOption.IGNORE_CASE)
+        val urlRegex = Regex("""["'](https?://[^"']+\.(?:jpg|jpeg|png|webp|avif|gif)[^"']*)["']""", RegexOption.IGNORE_CASE)
+        val allMatches = mutableSetOf<String>()
+        
+        scriptRegex.findAll(html).forEach { scriptMatch ->
+            val scriptContent = scriptMatch.groupValues[1]
+            urlRegex.findAll(scriptContent).forEach { urlMatch ->
+                var url = urlMatch.groupValues[1].replace("\\/", "/")
+                if (url.startsWith("//")) url = "https:$url"
+                if (url.startsWith("http")) allMatches.add(url)
+            }
+        }
+        return allMatches.toList()
+    }
+
     override fun pageListParse(response: Response): List<Page> {
         val html = response.body.string()
         val chapterUrl = response.request.url.toString()
         val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
 
-        val allImageUrls = extractAllImageUrls(html)
+        // 1. استخراج الصور من المسار الأصلي (images array)
+        val allImageUrls = extractAllImageUrls(html).toMutableSet()
+        
+        // 2. استخراج الصور المؤجلة من خاصيات data-src / data-lazy-src
+        val lazyImages = extractLazyImagesFromHtml(html)
+        allImageUrls.addAll(lazyImages)
+        
+        // 3. استخراج الصور المضمنة داخل JavaScript (إن وجدت)
+        val jsImages = extractImagesFromJavaScript(html)
+        allImageUrls.addAll(jsImages)
+        
+        // 4. استخراج الخرائط المبعثرة (Scrambled maps) كما هي
         val embeddedMaps = extractEmbeddedMaps(html)
         val deferredToken = extractDeferredToken(html)
 
@@ -341,19 +381,24 @@ class ProChan : HttpSource() {
         val existingUrls = mutableSetOf<String>()
         var index = 0
 
+        // إضافة الصور المستخرجة (مع التأكد من عدم التكرار)
         allImageUrls.forEach { url ->
-            pages.add(Page(index++, chapterUrl, url))
-            existingUrls.add(url)
-        }
-
-        embeddedMaps.forEach { map ->
-            if (map.pieces.isNotEmpty()) {
-                val encoded = encodeMap(map)
-                pages.add(Page(index++, chapterUrl, encoded))
-                existingUrls.add(map.pieces.first())
+            if (existingUrls.add(url)) {
+                pages.add(Page(index++, chapterUrl, url))
             }
         }
 
+        // إضافة الخرائط المبعثرة (نظام الحماية)
+        embeddedMaps.forEach { map ->
+            if (map.pieces.isNotEmpty()) {
+                val encoded = encodeMap(map)
+                if (existingUrls.add(map.pieces.first())) {
+                    pages.add(Page(index++, chapterUrl, encoded))
+                }
+            }
+        }
+
+        // 5. معالجة الوسائط المؤجلة (Deferred Media) كما هي
         if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
