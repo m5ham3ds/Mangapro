@@ -61,7 +61,7 @@ class ProChan : HttpSource() {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
 
-    // استخدام CookieInterceptor الرسمي من keiyoushi (بدون JavaNetCookieJar)
+    // إعداد العميل مع CookieInterceptor ومعترض الصور المشفرة
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -75,10 +75,13 @@ class ProChan : HttpSource() {
         )
         .build()
 
+    // ترويسات قوية لمحاكاة متصفح حقيقي وتجاوز الحماية
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
         .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
 
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
@@ -303,7 +306,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST
+    // PAGE LIST - محسّن لاستخراج الصور المؤجلة والمشفرة
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -327,10 +330,9 @@ class ProChan : HttpSource() {
         }
     }
 
-    // دوال مساعدة لاستخراج الصور المؤجلة والنصوص البرمجية
+    // استخراج الصور من خاصيات lazy loading (data-src, data-lazy-src إلخ)
     private fun extractLazyImagesFromHtml(html: String): List<String> {
         val imageUrls = mutableSetOf<String>()
-        // البحث عن وسوم img تحتوي على data-src أو data-lazy-src
         val imgRegex = Regex("<img[^>]+(data-(?:lazy-)?src)=(?:'|\")([^'\"]+)(?:'|\")", RegexOption.IGNORE_CASE)
         imgRegex.findAll(html).forEach { match ->
             var url = match.groupValues[2]
@@ -340,6 +342,7 @@ class ProChan : HttpSource() {
         return imageUrls.toList()
     }
 
+    // استخراج الصور من كود JavaScript (في حال كانت الصور داخل مصفوفة)
     private fun extractImagesFromJavaScript(html: String): List<String> {
         val scriptRegex = Regex("<script[^>]*>([\\s\\S]*?)</script>", RegexOption.IGNORE_CASE)
         val urlRegex = Regex("""["'](https?://[^"']+\.(?:jpg|jpeg|png|webp|avif|gif)[^"']*)["']""", RegexOption.IGNORE_CASE)
@@ -362,18 +365,18 @@ class ProChan : HttpSource() {
         val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
 
-        // 1. استخراج الصور من المسار الأصلي (images array)
+        // 1. الصور العادية من مصفوفة images
         val allImageUrls = extractAllImageUrls(html).toMutableSet()
         
-        // 2. استخراج الصور المؤجلة من خاصيات data-src / data-lazy-src
+        // 2. الصور المؤجلة من خاصيات data-*
         val lazyImages = extractLazyImagesFromHtml(html)
         allImageUrls.addAll(lazyImages)
         
-        // 3. استخراج الصور المضمنة داخل JavaScript (إن وجدت)
+        // 3. الصور الموجودة داخل نصوص JavaScript
         val jsImages = extractImagesFromJavaScript(html)
         allImageUrls.addAll(jsImages)
         
-        // 4. استخراج الخرائط المبعثرة (Scrambled maps) كما هي
+        // 4. الخرائط المبعثرة (نظام التشفير الخاص بالموقع)
         val embeddedMaps = extractEmbeddedMaps(html)
         val deferredToken = extractDeferredToken(html)
 
@@ -381,14 +384,14 @@ class ProChan : HttpSource() {
         val existingUrls = mutableSetOf<String>()
         var index = 0
 
-        // إضافة الصور المستخرجة (مع التأكد من عدم التكرار)
+        // إضافة الصور المباشرة
         allImageUrls.forEach { url ->
             if (existingUrls.add(url)) {
                 pages.add(Page(index++, chapterUrl, url))
             }
         }
 
-        // إضافة الخرائط المبعثرة (نظام الحماية)
+        // إضافة الخرائط المبعثرة
         embeddedMaps.forEach { map ->
             if (map.pieces.isNotEmpty()) {
                 val encoded = encodeMap(map)
@@ -398,7 +401,7 @@ class ProChan : HttpSource() {
             }
         }
 
-        // 5. معالجة الوسائط المؤجلة (Deferred Media) كما هي
+        // 5. الصور المؤجلة عبر API (deferredMedia)
         if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
