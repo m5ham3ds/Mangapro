@@ -66,8 +66,7 @@ class ProChan : HttpSource() {
         .addNetworkInterceptor(
             CookieInterceptor(
                 domain,
-                listOf("safe_browsing" to "off", "language" to "ar"),
-                true // حفظ الكوكيز ديناميكياً من الموقع
+                listOf("safe_browsing" to "off", "language" to "ar")
             )
         )
         .build()
