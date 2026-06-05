@@ -66,11 +66,9 @@ class ProChan : HttpSource() {
         .addNetworkInterceptor(
             CookieInterceptor(
                 domain,
-                listOf(
-                    "safe_browsing" to "off",
-                    "language" to "ar",
-                ),
-            ),
+                listOf("safe_browsing" to "off", "language" to "ar"),
+                true // حفظ الكوكيز ديناميكياً من الموقع
+            )
         )
         .build()
 
@@ -620,19 +618,21 @@ class ProChan : HttpSource() {
         try {
             for (i in 0 until n) {
                 try {
-                    val resp = client.newCall(
-                        Request.Builder()
-                            .url(map.pieces[i])
-                            .headers(this@ProChan.headers) // استخدام ترويسات الإضافة الأساسية
-                            .header("Referer", "$baseUrl/")
-                            .header("Accept", "image/avif,image/webp,image/jpeg,*/*")
-                            .header("Sec-Fetch-Dest", "image")
-                            .build(),
-                    ).execute()
+                    // استخدام client مباشرة بدون هيدرز يدوية لضمان استخدام الجلسة والكوكيز
+                    val request = GET(map.pieces[i])
+                    val resp = client.newCall(request).execute()
+                    
+                    if (!resp.isSuccessful) {
+                        resp.close()
+                        continue
+                    }
+                    
                     val bytes = resp.body.bytes()
                     resp.close()
                     rawBitmaps[i] = decodeAvif(bytes)
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.e("ProChan-Debug", "خطأ في تحميل القطعة $i: ${e.message}")
+                }
             }
 
             val orderedBitmaps = Array(n) { pos ->
