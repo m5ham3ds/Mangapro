@@ -81,7 +81,7 @@ class ProChan : HttpSource() {
         .set("Origin", baseUrl)
         .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
         .set("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
-        .set("Sec-Ch-Ua-Mobile", "?1") // طلب من هاتف
+        .set("Sec-Ch-Ua-Mobile", "?1")
         .set("Sec-Ch-Ua-Platform", "\"Android\"")
 
     private val rscHeaders = headersBuilder()
@@ -403,21 +403,34 @@ class ProChan : HttpSource() {
             }
         }
 
-        // 5. الصور المؤجلة عبر API مع ترويسات محسّنة
+        // 5. الصور المؤجلة عبر API مع معالجة صارمة للأخطاء
         if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
-                .set("X-Requested-With", "XMLHttpRequest") // مهم لتجاوز الحماية
+                .set("X-Requested-With", "XMLHttpRequest")
                 .build()
 
             try {
-                val deferredResponse = client.newCall(
+                // المحاولة الأولى بالمسار الافتراضي
+                var deferredResponse = client.newCall(
                     GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
                 ).execute()
 
+                // إذا قام الموقع بتحديث الرابط الخاص به وأعطى 404، جرب المسار البديل
+                if (deferredResponse.code == 404) {
+                    deferredResponse.close()
+                    deferredResponse = client.newCall(
+                        GET("$baseUrl/api/public/chapter/$chapterId/deferred-media?token=$deferredToken", apiHeaders)
+                    ).execute()
+                }
+
                 if (deferredResponse.isSuccessful) {
                     val bodyString = deferredResponse.body.string()
+                    deferredResponse.close()
+                    
+                    var parsedSuccessfully = false
+
                     try {
                         val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
                         deferredData.data.images.forEach { url ->
@@ -448,29 +461,51 @@ class ProChan : HttpSource() {
                                 pages.add(Page(index++, chapterUrl, encodeMap(map)))
                             }
                         }
+                        parsedSuccessfully = true
                     } catch (e: Exception) {
-                        val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
-                        if (chapterDeferred.success && chapterDeferred.data != null) {
-                            chapterDeferred.data.images.forEach { url ->
-                                if (existingUrls.add(url)) {
-                                    pages.add(Page(index++, chapterUrl, url))
+                        try {
+                            val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
+                            if (chapterDeferred.success && chapterDeferred.data != null) {
+                                chapterDeferred.data.images.forEach { url ->
+                                    if (existingUrls.add(url)) {
+                                        pages.add(Page(index++, chapterUrl, url))
+                                    }
                                 }
-                            }
-                            chapterDeferred.data.maps.forEach { map ->
-                                val key = map.pieces.firstOrNull() ?: return@forEach
-                                if (existingUrls.add(key)) {
-                                    pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                                chapterDeferred.data.maps.forEach { map ->
+                                    val key = map.pieces.firstOrNull() ?: return@forEach
+                                    if (existingUrls.add(key)) {
+                                        pages.add(Page(index++, chapterUrl, encodeMap(map)))
+                                    }
                                 }
+                                parsedSuccessfully = true
                             }
+                        } catch (e2: Exception) {
+                            throw Exception("فشل تحليل استجابة الخادم للصور المؤجلة، ربما تغير هيكل الحماية.")
                         }
                     }
-                } else if (deferredResponse.code == 403) {
-                    throw Exception("⚠️ HTTP 403 - فشل جلب الصور المؤجلة\n\n🔧 الحل: افتح WebView، تصفح هذا الفصل يدوياً حتى تظهر الصور، ثم ارجع وأعد المحاولة.")
+                    
+                    if (!parsedSuccessfully) {
+                        throw Exception("تم جلب الاستجابة بنجاح لكن لم يتم العثور على أي بيانات للصور.")
+                    }
+
+                } else {
+                    val code = deferredResponse.code
+                    deferredResponse.close()
+                    when (code) {
+                        403 -> throw Exception("⚠️ HTTP 403 - فشل جلب الصور المؤجلة\n\n🔧 الحل: افتح WebView وتصفح الفصل حتى تظهر الصور لتجاوز نظام الحماية (Cloudflare).")
+                        401 -> throw Exception("⚠️ HTTP 401 - غير مصرح. الـ Token منتهي الصلاحية أو غير صالح.")
+                        404 -> throw Exception("⚠️ HTTP 404 - لم يتم العثور على رابط الصور المؤجلة، يبدو أن الموقع قام بتحديث نظامه.")
+                        else -> throw Exception("⚠️ خطأ HTTP $code أثناء محاولة جلب باقي صفحات الفصل.")
+                    }
                 }
-                deferredResponse.close()
             } catch (e: Exception) {
-                Log.e(name, "فشل جلب الصور المؤجلة", e)
+                Log.e(name, "فشل الاتصال بالصور المؤجلة", e)
                 throw e
+            }
+        } else {
+            // تنبيه المستخدم إذا كان التوكن مفقوداً تماماً والموقع يحتوي على نظام التأجيل
+            if (html.contains("deferredToken") || html.contains("chapter-deferred")) {
+                throw Exception("⚠️ لم يتمكن التطبيق من العثور على رمز الحماية (Token) لجلب باقي الصور من الموقع.")
             }
         }
 
@@ -506,8 +541,17 @@ class ProChan : HttpSource() {
         }
     }
 
-    // تحسين استخراج التوكن: البحث عن أي JWT token في الصفحة (آخر واحد غالباً هو المطلوب)
+    // دالة محسنة للبحث عن التوكن بشكل موجه داخل الـ JSON بدلاً من الاعتماد العشوائي
     private fun extractDeferredToken(html: String): String? {
+        // البحث الأول المباشر عن المفتاح
+        val specificTokenRegex = Regex(""""deferredToken"\s*:\s*"([^"]+)"""")
+        specificTokenRegex.find(html)?.let { return it.groupValues[1] }
+
+        // البحث الثاني عن مسار token العام داخل الكائنات 
+        val tokenRegex = Regex(""""token"\s*:\s*"(eyJ[a-zA-Z0-9-_.]+)"""")
+        tokenRegex.find(html)?.let { return it.groupValues[1] }
+
+        // الملاذ الأخير (الطريقة القديمة)
         val jwtRegex = Regex("""eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+""")
         val matches = jwtRegex.findAll(html).map { it.value }.toList()
         return matches.lastOrNull()
