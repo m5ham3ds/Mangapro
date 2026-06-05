@@ -74,15 +74,15 @@ class ProChan : HttpSource() {
         )
         .build()
 
-    // ======================== ترويسات محسّنة لمحاكاة متصفح حقيقي ========================
+    // ======================== ترويسات محسّنة لمحاكاة متصفح هاتف أندرويد ========================
     override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .set("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
         .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
         .set("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
-        .set("Sec-Ch-Ua-Mobile", "?0")
-        .set("Sec-Ch-Ua-Platform", "\"Windows\"")
+        .set("Sec-Ch-Ua-Mobile", "?1") // طلب من هاتف
+        .set("Sec-Ch-Ua-Platform", "\"Android\"")
 
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
@@ -309,7 +309,8 @@ class ProChan : HttpSource() {
     // =================================================================
     // PAGE LIST - مع تحسينات استخراج الصور والتعامل مع الحماية
     // =================================================================
-    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
+    // استخدام headers عادية بدلاً من rscHeaders للحصول على HTML طبيعي يمكن استخراج التوكن منه
+    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
 
     override fun getChapterUrl(chapter: SChapter): String {
         val url = if (chapter.url.startsWith("{")) chapter.url.parseAs<ChapterUrl>() else chapter.url
@@ -505,14 +506,11 @@ class ProChan : HttpSource() {
         }
     }
 
-    // تحسين استخراج التوكن ليكون أكثر مرونة
+    // تحسين استخراج التوكن: البحث عن أي JWT token في الصفحة (آخر واحد غالباً هو المطلوب)
     private fun extractDeferredToken(html: String): String? {
-        val regex = Regex("\"deferredMedia\"\\s*:\\s*\\{\\s*\"token\"\\s*:\\s*\"([^\"]+)\"")
-        val match = regex.find(html)
-        if (match != null) return match.groupValues[1]
-        // البحث عن أي JWT token كخيار احتياطي
-        val jwtRegex = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
-        return jwtRegex.find(html)?.value
+        val jwtRegex = Regex("""eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+""")
+        val matches = jwtRegex.findAll(html).map { it.value }.toList()
+        return matches.lastOrNull()
     }
 
     private fun encodeMap(map: ScrambledMap): String {
@@ -581,9 +579,10 @@ class ProChan : HttpSource() {
                     val resp = client.newCall(
                         Request.Builder()
                             .url(map.pieces[i])
+                            .headers(this@ProChan.headers) // استخدام ترويسات الإضافة الأساسية
                             .header("Referer", "$baseUrl/")
                             .header("Accept", "image/avif,image/webp,image/jpeg,*/*")
-                            .header("User-Agent", headers["User-Agent"] ?: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36")
+                            .header("Sec-Fetch-Dest", "image")
                             .build(),
                     ).execute()
                     val bytes = resp.body.bytes()
