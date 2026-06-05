@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Base64
 import android.util.Log
+import android.webkit.CookieManager
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.Filter
@@ -61,6 +62,9 @@ class ProChan : HttpSource() {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
 
+    // مزامنة الكوكيز مع WebView
+    private val cookieManager = CookieManager.getInstance()
+
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -73,7 +77,7 @@ class ProChan : HttpSource() {
 
     // ======================== ترويسات محسّنة لمحاكاة متصفح هاتف أندرويد ========================
     override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+        .set("User-Agent", okhttp3.internal.userAgent)  // ديناميكي ليتطابق مع WebView
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
         .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
@@ -316,7 +320,12 @@ class ProChan : HttpSource() {
 
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
         return Observable.fromCallable {
-            val request = pageListRequest(chapter)
+            // مزامنة الكوكيز من WebView قبل الطلب
+            val cookies = cookieManager.getCookie(baseUrl)
+            val request = pageListRequest(chapter).newBuilder()
+                .header("Cookie", cookies ?: "")
+                .build()
+
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
                 response.close()
@@ -400,12 +409,14 @@ class ProChan : HttpSource() {
             }
         }
 
-        // 5. الصور المؤجلة عبر API مع معالجة صارمة للأخطاء
+        // 5. الصور المؤجلة عبر API مع مزامنة الكوكيز
         if (deferredToken != null) {
+            val cookies = cookieManager.getCookie(baseUrl) ?: ""
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
                 .set("X-Requested-With", "XMLHttpRequest")
+                .set("Cookie", cookies)
                 .build()
 
             try {
@@ -538,17 +549,14 @@ class ProChan : HttpSource() {
         }
     }
 
-    // دالة محسنة للبحث عن التوكن بشكل موجه داخل الـ JSON بدلاً من الاعتماد العشوائي
+    // دالة محسنة للبحث عن التوكن بشكل موجه داخل الـ JSON
     private fun extractDeferredToken(html: String): String? {
-        // البحث الأول المباشر عن المفتاح
         val specificTokenRegex = Regex(""""deferredToken"\s*:\s*"([^"]+)"""")
         specificTokenRegex.find(html)?.let { return it.groupValues[1] }
 
-        // البحث الثاني عن مسار token العام داخل الكائنات 
         val tokenRegex = Regex(""""token"\s*:\s*"(eyJ[a-zA-Z0-9-_.]+)"""")
         tokenRegex.find(html)?.let { return it.groupValues[1] }
 
-        // الملاذ الأخير (الطريقة القديمة)
         val jwtRegex = Regex("""eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+""")
         val matches = jwtRegex.findAll(html).map { it.value }.toList()
         return matches.lastOrNull()
@@ -617,7 +625,6 @@ class ProChan : HttpSource() {
         try {
             for (i in 0 until n) {
                 try {
-                    // استخدام client مباشرة بدون هيدرز يدوية لضمان استخدام الجلسة والكوكيز
                     val request = GET(map.pieces[i])
                     val resp = client.newCall(request).execute()
                     
