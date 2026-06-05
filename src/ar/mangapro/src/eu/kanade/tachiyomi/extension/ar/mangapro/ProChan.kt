@@ -61,7 +61,6 @@ class ProChan : HttpSource() {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
 
-    // إعداد العميل مع CookieInterceptor ومعترض الصور المشفرة
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
         .addNetworkInterceptor(
@@ -75,13 +74,15 @@ class ProChan : HttpSource() {
         )
         .build()
 
-    // ترويسات قوية لمحاكاة متصفح حقيقي وتجاوز الحماية
+    // ======================== ترويسات محسّنة لمحاكاة متصفح حقيقي ========================
     override fun headersBuilder() = super.headersBuilder()
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
         .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        .set("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+        .set("Sec-Ch-Ua-Mobile", "?0")
+        .set("Sec-Ch-Ua-Platform", "\"Windows\"")
 
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
@@ -306,7 +307,7 @@ class ProChan : HttpSource() {
     }
 
     // =================================================================
-    // PAGE LIST - محسّن لاستخراج الصور المؤجلة والمشفرة
+    // PAGE LIST - مع تحسينات استخراج الصور والتعامل مع الحماية
     // =================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
 
@@ -330,7 +331,7 @@ class ProChan : HttpSource() {
         }
     }
 
-    // استخراج الصور من خاصيات lazy loading (data-src, data-lazy-src إلخ)
+    // استخراج الصور من خاصيات lazy loading
     private fun extractLazyImagesFromHtml(html: String): List<String> {
         val imageUrls = mutableSetOf<String>()
         val imgRegex = Regex("<img[^>]+(data-(?:lazy-)?src)=(?:'|\")([^'\"]+)(?:'|\")", RegexOption.IGNORE_CASE)
@@ -342,7 +343,7 @@ class ProChan : HttpSource() {
         return imageUrls.toList()
     }
 
-    // استخراج الصور من كود JavaScript (في حال كانت الصور داخل مصفوفة)
+    // استخراج الصور من النصوص البرمجية
     private fun extractImagesFromJavaScript(html: String): List<String> {
         val scriptRegex = Regex("<script[^>]*>([\\s\\S]*?)</script>", RegexOption.IGNORE_CASE)
         val urlRegex = Regex("""["'](https?://[^"']+\.(?:jpg|jpeg|png|webp|avif|gif)[^"']*)["']""", RegexOption.IGNORE_CASE)
@@ -376,7 +377,7 @@ class ProChan : HttpSource() {
         val jsImages = extractImagesFromJavaScript(html)
         allImageUrls.addAll(jsImages)
         
-        // 4. الخرائط المبعثرة (نظام التشفير الخاص بالموقع)
+        // 4. الخرائط المبعثرة
         val embeddedMaps = extractEmbeddedMaps(html)
         val deferredToken = extractDeferredToken(html)
 
@@ -401,11 +402,12 @@ class ProChan : HttpSource() {
             }
         }
 
-        // 5. الصور المؤجلة عبر API (deferredMedia)
+        // 5. الصور المؤجلة عبر API مع ترويسات محسّنة
         if (deferredToken != null) {
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
+                .set("X-Requested-With", "XMLHttpRequest") // مهم لتجاوز الحماية
                 .build()
 
             try {
@@ -503,10 +505,12 @@ class ProChan : HttpSource() {
         }
     }
 
+    // تحسين استخراج التوكن ليكون أكثر مرونة
     private fun extractDeferredToken(html: String): String? {
         val regex = Regex("\"deferredMedia\"\\s*:\\s*\\{\\s*\"token\"\\s*:\\s*\"([^\"]+)\"")
         val match = regex.find(html)
         if (match != null) return match.groupValues[1]
+        // البحث عن أي JWT token كخيار احتياطي
         val jwtRegex = Regex("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.[a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9_\\-]+")
         return jwtRegex.find(html)?.value
     }
@@ -519,11 +523,16 @@ class ProChan : HttpSource() {
         return "$SCRAMBLED_SCHEME$encoded"
     }
 
+    // طلب الصور مع ترويسات متخصصة
     override fun imageRequest(page: Page): Request {
-        val headers = headersBuilder()
+        val imageHeaders = headersBuilder()
+            .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
             .set("Referer", page.url)
+            .set("Sec-Fetch-Dest", "image")
+            .set("Sec-Fetch-Mode", "no-cors")
+            .set("Sec-Fetch-Site", "same-origin")
             .build()
-        return GET(page.imageUrl!!, headers)
+        return GET(page.imageUrl!!, imageHeaders)
     }
 
     // =================================================================
