@@ -21,6 +21,7 @@ import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.Callback
@@ -54,16 +55,18 @@ class ProChan : HttpSource() {
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 9
+    override val versionId = 10
 
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
+        private const val TILED_SCHEME = "https://procomic.net/__tiled__/?map="
     }
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
+        .addInterceptor(::tiledImageInterceptor)
         .addNetworkInterceptor(
             CookieInterceptor(
                 domain,
@@ -347,6 +350,93 @@ class ProChan : HttpSource() {
         }
     }
 
+    // =================================================================
+    // استخراج صفحات الفصل من الـ HTML مباشرة (لا حاجة لأي API إضافي)
+    // =================================================================
+    // بعد فحص المصدر الفعلي لصفحة فصل حقيقية، تبيّن أن الموقع لا يستخدم إطلاقاً أي
+    // "deferredToken" ولا "chapter-deferred-media" ولا JWT ولا خرائط JSON مشفّرة بـ
+    // AES كما كان مفترضاً سابقاً (بحثنا في المصدر الحقيقي كاملاً ولم نجد أياً من هذه
+    // النصوص إطلاقاً). الصفحات كلها موجودة فعلياً وبشكل كامل داخل HTML الأولي نفسه،
+    // على شكلين فقط:
+    //
+    // 1) صفحة عادية (غير مقسّمة): <div class="leading-[0]"><img alt="page N" ...
+    //    src="...mobile.avif"><img alt="page N" ... src="...desktop.avif"></div>
+    //    نأخذ نسخة "desktop" لأنها الأعلى جودة.
+    //
+    // 2) صفحة "مقسّمة بصرياً" لأغراض مكافحة السحب المباشر (وليست مشفّرة إطلاقاً):
+    //    <div style="position:relative;...;padding-bottom:X%"> تحتوي عدة <img> بلا
+    //    alt، كل واحدة منها لها style="left:L%;top:T%;width:W%;height:H%" يحدد
+    //    مكانها الحقيقي والنهائي داخل الصورة الكاملة، بالإضافة إلى <canvas
+    //    width="W" height="H"> يعطينا الأبعاد الفعلية بالبكسل مباشرة. أي أن كل ما
+    //    نحتاجه لإعادة بناء الصورة الكاملة (روابط القطع + مواقعها الدقيقة) موجود
+    //    مسبقاً في الصفحة نفسها، دون أي تشفير أو ترتيب عشوائي يحتاج فك تشفير.
+    private val simplePageBlockRegex = Regex(
+        """<div class="leading-\[0\]">((?:<img[^>]*?>)+?)</div>""",
+    )
+    private val tiledPageBlockRegex = Regex(
+        """<div style="position:\s*relative;\s*width:\s*100%;\s*padding-bottom:\s*[0-9.]+%;">((?:<img[^>]*?>)+?)<canvas[^>]*?\swidth="(\d+)"[^>]*?\sheight="(\d+)"[^>]*?></canvas></div>""",
+    )
+    private val imgSrcRegex = Regex("""<img[^>]*?\ssrc="([^"]+)"""")
+    private val tilePieceRegex = Regex(
+        """<img[^>]*?\ssrc="([^"]+)"[^>]*?\sstyle="left:\s*([0-9.]+)%;\s*top:\s*([0-9.]+)%;\s*width:\s*([0-9.]+)%;\s*height:\s*([0-9.]+)%;"""",
+    )
+
+    private fun unescapeHtmlUrl(url: String) = url.replace("&amp;", "&").replace("\\/", "/")
+
+    /**
+     * يمرّ على مقاطع الـ HTML بالترتيب الذي تظهر فيه (صفحات عادية أو مقسّمة)
+     * ويبني قائمة [Page] كاملة ومرتّبة دون أي طلب شبكة إضافي.
+     */
+    private fun extractChapterPagesFromHtml(html: String, chapterUrl: String): List<Page> {
+        data class Unit(val start: Int, val page: Page?)
+
+        var index = 0
+        val units = mutableListOf<Unit>()
+
+        simplePageBlockRegex.findAll(html).forEach { match ->
+            val content = match.groupValues[1]
+            val srcs = imgSrcRegex.findAll(content).map { unescapeHtmlUrl(it.groupValues[1]) }.toList()
+            val chosen = srcs.firstOrNull { "desktop" in it } ?: srcs.firstOrNull()
+            units.add(Unit(match.range.first, chosen?.let { Page(0, chapterUrl, it) }))
+        }
+
+        tiledPageBlockRegex.findAll(html).forEach { match ->
+            val content = match.groupValues[1]
+            val canvasWidth = match.groupValues[2].toIntOrNull()
+            val canvasHeight = match.groupValues[3].toIntOrNull()
+            if (canvasWidth == null || canvasHeight == null) return@forEach
+
+            val pieces = tilePieceRegex.findAll(content).map { m ->
+                TiledPiece(
+                    url = unescapeHtmlUrl(m.groupValues[1]),
+                    left = m.groupValues[2].toDouble(),
+                    top = m.groupValues[3].toDouble(),
+                    width = m.groupValues[4].toDouble(),
+                    height = m.groupValues[5].toDouble(),
+                )
+            }.toList()
+
+            val page = if (pieces.isNotEmpty()) {
+                Page(0, chapterUrl, encodeTiledPage(TiledPage(canvasWidth, canvasHeight, pieces)))
+            } else {
+                null
+            }
+            units.add(Unit(match.range.first, page))
+        }
+
+        return units.sortedBy { it.start }
+            .mapNotNull { it.page }
+            .map { page -> Page((index++), page.url, page.imageUrl) }
+    }
+
+    private fun encodeTiledPage(page: TiledPage): String {
+        val encoded = Base64.encodeToString(
+            json.encodeToString(TiledPage.serializer(), page).toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_WRAP,
+        )
+        return "$TILED_SCHEME$encoded"
+    }
+
     private fun extractLazyImagesFromHtml(html: String): List<String> {
         val imageUrls = mutableSetOf<String>()
         val imgRegex = Regex("<img[^>]+(data-(?:lazy-)?src)=(?:'|\")([^'\"]+)(?:'|\")", RegexOption.IGNORE_CASE)
@@ -380,11 +470,24 @@ class ProChan : HttpSource() {
         val seriesId = response.request.url.pathSegments[2]
         val chapterId = response.request.url.pathSegments[4]
 
+        val pages = extractChapterPagesFromHtml(html, chapterUrl)
+
+        val finalPages = pages.ifEmpty {
+            // احتياطي أخير فقط: إن لم نجد أي صفحة بالطريقة المباشرة أعلاه (مثلاً فصل
+            // مقفل بعملات أو تغيّر هيكل الموقع مستقبلاً)، نجرّب المسارات القديمة.
+            // هذا المسار غير مؤكد وجوده فعلياً في الموقع (لم نجد له أي أثر في العينات
+            // الحقيقية التي تم فحصها)، لذا هو مجرد شبكة أمان ولا يجب الاعتماد عليه.
+            legacyFallbackPages(html, chapterUrl, chapterId)
+        }
+
+        countViews(seriesId, chapterId)
+        return finalPages
+    }
+
+    private fun legacyFallbackPages(html: String, chapterUrl: String, chapterId: String): List<Page> {
         val allImageUrls = extractAllImageUrls(html).toMutableSet()
-        val lazyImages = extractLazyImagesFromHtml(html)
-        allImageUrls.addAll(lazyImages)
-        val jsImages = extractImagesFromJavaScript(html)
-        allImageUrls.addAll(jsImages)
+        allImageUrls.addAll(extractLazyImagesFromHtml(html))
+        allImageUrls.addAll(extractImagesFromJavaScript(html))
         val embeddedMaps = extractEmbeddedMaps(html)
         val deferredToken = extractDeferredToken(html)
 
@@ -408,9 +511,6 @@ class ProChan : HttpSource() {
         }
 
         if (deferredToken != null) {
-            // نفس الملاحظة: لا نضع Cookie يدوياً هنا، الـ client يرفقها تلقائياً من الـ
-            // CookieJar الخاص به. نضيف Origin هنا فقط لأن هذا الطلب فعلياً هو طلب
-            // fetch()/XHR من صفحة الفصل (وليس تصفح/navigation)، وهذا ما يرسله المتصفح فعلاً.
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
@@ -433,8 +533,6 @@ class ProChan : HttpSource() {
                 if (deferredResponse.isSuccessful) {
                     val bodyString = deferredResponse.body.string()
                     deferredResponse.close()
-                    
-                    var parsedSuccessfully = false
 
                     try {
                         val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
@@ -466,7 +564,6 @@ class ProChan : HttpSource() {
                                 pages.add(Page(index++, chapterUrl, encodeMap(map)))
                             }
                         }
-                        parsedSuccessfully = true
                     } catch (e: Exception) {
                         try {
                             val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
@@ -482,38 +579,23 @@ class ProChan : HttpSource() {
                                         pages.add(Page(index++, chapterUrl, encodeMap(map)))
                                     }
                                 }
-                                parsedSuccessfully = true
                             }
                         } catch (e2: Exception) {
-                            throw Exception("فشل تحليل استجابة الخادم للصور المؤجلة، ربما تغير هيكل الحماية.")
+                            // لا نرمي استثناءً هنا: هذا المسار احتياطي غير مؤكد أصلاً.
                         }
                     }
-                    
-                    if (!parsedSuccessfully) {
-                        throw Exception("تم جلب الاستجابة بنجاح لكن لم يتم العثور على أي بيانات للصور.")
-                    }
-
                 } else {
-                    val code = deferredResponse.code
                     deferredResponse.close()
-                    when (code) {
-                        403 -> throw Exception("⚠️ HTTP 403 - فشل جلب الصور المؤجلة\n\n🔧 الحل: افتح WebView وتصفح الفصل حتى تظهر الصور لتجاوز نظام الحماية (Cloudflare).")
-                        401 -> throw Exception("⚠️ HTTP 401 - غير مصرح. الـ Token منتهي الصلاحية أو غير صالح.")
-                        404 -> throw Exception("⚠️ HTTP 404 - لم يتم العثور على رابط الصور المؤجلة، يبدو أن الموقع قام بتحديث نظامه.")
-                        else -> throw Exception("⚠️ خطأ HTTP $code أثناء محاولة جلب باقي صفحات الفصل.")
-                    }
                 }
             } catch (e: Exception) {
-                Log.e(name, "فشل الاتصال بالصور المؤجلة", e)
-                throw e
-            }
-        } else {
-            if (html.contains("deferredToken") || html.contains("chapter-deferred")) {
-                throw Exception("⚠️ لم يتمكن التطبيق من العثور على رمز الحماية (Token) لجلب باقي الصور من الموقع.")
+                Log.e(name, "فشل الاتصال بالصور المؤجلة (مسار احتياطي)", e)
             }
         }
 
-        countViews(seriesId, chapterId)
+        if (pages.isEmpty()) {
+            throw Exception("⚠️ لم يتم العثور على أي صفحات لهذا الفصل.\n\n🔧 الحل: افتح WebView من إعدادات الامتداد، تصفح هذا الفصل يدوياً، ثم أعد المحاولة، وإن استمرت المشكلة فقد يكون هيكل الموقع قد تغيّر.")
+        }
+
         return pages
     }
 
@@ -546,13 +628,6 @@ class ProChan : HttpSource() {
     }
 
     private fun extractDeferredToken(html: String): String? {
-        // مهم: عندما لا نرسل ترويسة rsc:1 نحصل على HTML عادي، لكن Next.js يضمّن بيانات
-        // الـ hydration داخل <script> كنص JS عبر self.__next_f.push([1,"...json..."])
-        // وفي هذه الحالة تكون علامات الاقتباس داخل الـ JSON "مهروبة" (escaped) بشكل
-        // \"deferredToken\":\"...\" وليس "deferredToken":"...". الـ Regex القديم كان
-        // يبحث فقط عن الشكل غير المهروب فيفشل غالباً، فيسقط الكود إلى البحث عن أي JWT
-        // في الصفحة (قد يكون توكن آخر لا علاقة له بالصور المؤجلة). لذلك نجعل علامة
-        // الاقتباس اختيارية قبل/بعد كل \" لتغطية الحالتين معاً.
         val specificTokenRegex = Regex("""\\?"deferredToken\\?"\s*:\s*\\?"([^"\\]+)\\?"""")
         specificTokenRegex.find(html)?.let { return it.groupValues[1] }
 
@@ -578,9 +653,89 @@ class ProChan : HttpSource() {
             .set("Referer", page.url)
             .set("Sec-Fetch-Dest", "image")
             .set("Sec-Fetch-Mode", "no-cors")
-            .set("Sec-Fetch-Site", "same-origin")
+            .set("Sec-Fetch-Site", "same-site")
             .build()
         return GET(page.imageUrl!!, headers)
+    }
+
+    // =================================================================
+    // TILED IMAGE INTERCEPTOR (الصفحات المقسّمة بصرياً فعلياً في الموقع)
+    // =================================================================
+    private fun tiledImageInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url.toString()
+
+        if (!url.startsWith(TILED_SCHEME)) {
+            return chain.proceed(request)
+        }
+
+        val encoded = url.removePrefix(TILED_SCHEME)
+        val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+        val tiledPage = json.decodeFromString<TiledPage>(pageJson)
+
+        val mergedBytes = reconstructTiledPage(tiledPage)
+            ?: return Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(500)
+                .message("فشل دمج الصورة المقسّمة")
+                .body("".toResponseBody(null))
+                .build()
+
+        return Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(mergedBytes.toResponseBody("image/jpeg".toMediaType()))
+            .build()
+    }
+
+    /**
+     * يعيد بناء الصفحة الكاملة من قطعها بالاعتماد على النسب المئوية الحقيقية
+     * (left/top/width/height) وأبعاد الـ canvas بالبكسل، كما هي موجودة فعلياً في HTML
+     * الموقع — لا يوجد أي تشفير أو ترتيب عشوائي يحتاج فك تشفير في هذا النوع من الصفحات.
+     */
+    private fun reconstructTiledPage(page: TiledPage): ByteArray? {
+        if (page.pieces.isEmpty() || page.canvasWidth <= 0 || page.canvasHeight <= 0) return null
+
+        val result = Bitmap.createBitmap(page.canvasWidth, page.canvasHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+        var drewAny = false
+
+        for (piece in page.pieces) {
+            try {
+                val resp = client.newCall(GET(piece.url)).execute()
+                if (!resp.isSuccessful) {
+                    resp.close()
+                    continue
+                }
+                val bytes = resp.body.bytes()
+                resp.close()
+                val bmp = decodeAvif(bytes) ?: continue
+
+                val left = (piece.left / 100.0 * page.canvasWidth).toInt()
+                val top = (piece.top / 100.0 * page.canvasHeight).toInt()
+                val right = left + (piece.width / 100.0 * page.canvasWidth).toInt()
+                val bottom = top + (piece.height / 100.0 * page.canvasHeight).toInt()
+
+                canvas.drawBitmap(bmp, null, Rect(left, top, right, bottom), null)
+                bmp.recycle()
+                drewAny = true
+            } catch (e: Exception) {
+                Log.e("ProChan-Debug", "خطأ في تحميل قطعة الصورة المقسّمة: ${e.message}")
+            }
+        }
+
+        if (!drewAny) {
+            result.recycle()
+            return null
+        }
+
+        val out = ByteArrayOutputStream()
+        result.compress(Bitmap.CompressFormat.JPEG, 90, out)
+        result.recycle()
+        return out.toByteArray()
     }
 
     // =================================================================
@@ -829,3 +984,27 @@ private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "com
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 private val MOBILE_REGEX = Regex("mobile|android|iphone|ipad|ipod", RegexOption.IGNORE_CASE)
 private val TABLES_REGEX = Regex("tablet", RegexOption.IGNORE_CASE)
+
+/**
+ * قطعة واحدة من صفحة "مقسّمة بصرياً" كما تُرسم فعلياً بالموقع عبر CSS: نسب مئوية
+ * تحدد موقعها (left/top) وحجمها (width/height) داخل حاوية الصفحة الكاملة.
+ */
+@Serializable
+data class TiledPiece(
+    val url: String,
+    val left: Double,
+    val top: Double,
+    val width: Double,
+    val height: Double,
+)
+
+/**
+ * صفحة كاملة مبنية من عدة [TiledPiece]، بأبعاد حقيقية بالبكسل (canvasWidth/Height)
+ * مأخوذة مباشرة من عنصر <canvas> الموجود في نفس حاوية الصفحة بالـ HTML الأصلي.
+ */
+@Serializable
+data class TiledPage(
+    val canvasWidth: Int,
+    val canvasHeight: Int,
+    val pieces: List<TiledPiece>,
+)
