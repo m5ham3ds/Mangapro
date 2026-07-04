@@ -6,7 +6,6 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Base64
 import android.util.Log
-import android.webkit.CookieManager
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.Filter
@@ -55,15 +54,13 @@ class ProChan : HttpSource() {
     private val domain = "procomic.net"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 8
+    override val versionId = 9
 
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
         private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
     }
-
-    private val cookieManager = CookieManager.getInstance()
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::scrambledImageInterceptor)
@@ -77,10 +74,14 @@ class ProChan : HttpSource() {
 
     // ======================== ترويسات محسّنة لمحاكاة متصفح هاتف أندرويد ========================
     override fun headersBuilder(): Headers.Builder {
+        // ملاحظة: تم حذف ترويسة Origin من هنا لأن المتصفح الحقيقي لا يرسلها في طلبات
+        // التصفح العادية (GET Navigation)، إرسالها في كل طلب قد تكون أحد أسباب كشف
+        // الإضافة كبوت من طرف نظام الحماية. سنضيفها فقط عند الحاجة (طلب deferred-media).
+        // كما تم تعمّد عدم إضافة "Accept-Encoding" يدوياً: OkHttp يتعامل معه تلقائياً،
+        // وأي تعيين يدوي له يعطّل فك الضغط (gzip) التلقائي فينتج عنه جسم استجابة تالف.
         return Headers.Builder()
             .set("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
             .set("Referer", "$baseUrl/")
-            .set("Origin", baseUrl)
             .set("Accept-Language", "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7")
             .set("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
             .set("Sec-Ch-Ua-Mobile", "?1")
@@ -325,10 +326,14 @@ class ProChan : HttpSource() {
 
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
         return Observable.fromCallable {
-            val cookies = cookieManager.getCookie(baseUrl)
-            val request = pageListRequest(chapter).newBuilder()
-                .header("Cookie", cookies ?: "")
-                .build()
+            // مهم جداً: لا نمرر ترويسة Cookie يدوياً هنا. عند تعيين ترويسة Cookie
+            // صراحةً على الطلب، يتجاهل OkHttp تماماً الكوكيز المخزّنة في الـ CookieJar
+            // الخاص بالـ client (وهو ما يحتفظ به `network.cloudflareClient` بعد حل تحدي
+            // Cloudflare تلقائياً). قراءة الكوكيز من android.webkit.CookieManager بدلاً
+            // من ذلك تعتمد على أن يكون المستخدم قد فتح WebView يدوياً من قبل، وإن لم يكن
+            // قد فعل فستُرسل ترويسة Cookie فارغة "" فتُلغي أي كوكيز صالحة كان الـ client
+            // نفسه قد حصل عليها. لهذا كانت الصور المؤجلة تفشل دائماً إلا بعد فتح WebView يدوياً.
+            val request = pageListRequest(chapter)
 
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
@@ -403,12 +408,14 @@ class ProChan : HttpSource() {
         }
 
         if (deferredToken != null) {
-            val cookies = cookieManager.getCookie(baseUrl) ?: ""
+            // نفس الملاحظة: لا نضع Cookie يدوياً هنا، الـ client يرفقها تلقائياً من الـ
+            // CookieJar الخاص به. نضيف Origin هنا فقط لأن هذا الطلب فعلياً هو طلب
+            // fetch()/XHR من صفحة الفصل (وليس تصفح/navigation)، وهذا ما يرسله المتصفح فعلاً.
             val apiHeaders = headers.newBuilder()
                 .set("Accept", "application/json")
                 .set("Referer", chapterUrl)
+                .set("Origin", baseUrl)
                 .set("X-Requested-With", "XMLHttpRequest")
-                .set("Cookie", cookies)
                 .build()
 
             try {
@@ -539,10 +546,17 @@ class ProChan : HttpSource() {
     }
 
     private fun extractDeferredToken(html: String): String? {
-        val specificTokenRegex = Regex(""""deferredToken"\s*:\s*"([^"]+)"""")
+        // مهم: عندما لا نرسل ترويسة rsc:1 نحصل على HTML عادي، لكن Next.js يضمّن بيانات
+        // الـ hydration داخل <script> كنص JS عبر self.__next_f.push([1,"...json..."])
+        // وفي هذه الحالة تكون علامات الاقتباس داخل الـ JSON "مهروبة" (escaped) بشكل
+        // \"deferredToken\":\"...\" وليس "deferredToken":"...". الـ Regex القديم كان
+        // يبحث فقط عن الشكل غير المهروب فيفشل غالباً، فيسقط الكود إلى البحث عن أي JWT
+        // في الصفحة (قد يكون توكن آخر لا علاقة له بالصور المؤجلة). لذلك نجعل علامة
+        // الاقتباس اختيارية قبل/بعد كل \" لتغطية الحالتين معاً.
+        val specificTokenRegex = Regex("""\\?"deferredToken\\?"\s*:\s*\\?"([^"\\]+)\\?"""")
         specificTokenRegex.find(html)?.let { return it.groupValues[1] }
 
-        val tokenRegex = Regex(""""token"\s*:\s*"(eyJ[a-zA-Z0-9-_.]+)"""")
+        val tokenRegex = Regex("""\\?"token\\?"\s*:\s*\\?"(eyJ[a-zA-Z0-9-_.]+)\\?"""")
         tokenRegex.find(html)?.let { return it.groupValues[1] }
 
         val jwtRegex = Regex("""eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+""")
