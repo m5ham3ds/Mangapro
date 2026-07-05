@@ -45,6 +45,8 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -712,7 +714,15 @@ class ProChan : HttpSource() {
         val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val tiledPage = json.decodeFromString<TiledPage>(pageJson)
 
-        val mergedBytes = reconstructTiledPage(tiledPage)
+        // مهم جداً: نستخدم نفس ترويسات الطلب الأصلي (التي ضبطناها بعناية في imageRequest():
+        // Referer + User-Agent + Accept صورة صحيحة) عند تحميل كل قطعة من قطع الصفحة على
+        // حدة. سابقاً كانت reconstructTiledPage تستدعي GET(piece.url) بلا أي ترويسات
+        // إطلاقاً، فكان خادم CDN (procomic.net) يحمي الصور من hotlinking ويرفض/يتجاهل
+        // نسبة كبيرة من طلبات القطع "العارية" هذه بصمت (والكود كان يتجاوزها بـ continue
+        // دون أي إعادة محاولة) — وهذا بالضبط سبب فقدان أجزاء كثيرة من كل صفحة مقسّمة.
+        val pieceHeaders = request.headers
+
+        val mergedBytes = reconstructTiledPage(tiledPage, pieceHeaders)
             ?: return Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
@@ -735,23 +745,30 @@ class ProChan : HttpSource() {
      * (left/top/width/height) وأبعاد الـ canvas بالبكسل، كما هي موجودة فعلياً في HTML
      * الموقع — لا يوجد أي تشفير أو ترتيب عشوائي يحتاج فك تشفير في هذا النوع من الصفحات.
      */
-    private fun reconstructTiledPage(page: TiledPage): ByteArray? {
+    private fun reconstructTiledPage(page: TiledPage, pieceHeaders: Headers): ByteArray? {
         if (page.pieces.isEmpty() || page.canvasWidth <= 0 || page.canvasHeight <= 0) return null
 
         val result = Bitmap.createBitmap(page.canvasWidth, page.canvasHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         var drewAny = false
 
-        for (piece in page.pieces) {
-            try {
-                val resp = client.newCall(GET(piece.url)).execute()
-                if (!resp.isSuccessful) {
-                    resp.close()
-                    continue
-                }
-                val bytes = resp.body.bytes()
-                resp.close()
-                val bmp = decodeAvif(bytes) ?: continue
+        // نحمّل كل القطع بالتوازي (بدل التتابع) عبر مسبح خيوط صغير: هذا يسرّع إعادة
+        // البناء بشكل كبير للصفحات كثيرة القطع، ويمنع أن يؤخّر تعليق قطعة واحدة كل
+        // الباقي حتى ينتهي المهلة الزمنية للطلب الأصلي من Mihon/Tachiyomi.
+        val pool = Executors.newFixedThreadPool(minOf(page.pieces.size, 6))
+        try {
+            val futures = page.pieces.map { piece ->
+                pool.submit<Bitmap?> { fetchTileBitmap(piece.url, pieceHeaders) }
+            }
+
+            for (i in page.pieces.indices) {
+                val piece = page.pieces[i]
+                val bmp = try {
+                    futures[i].get(25, TimeUnit.SECONDS)
+                } catch (e: Exception) {
+                    Log.e("ProChan-Debug", "انتهت مهلة تحميل قطعة الصورة المقسّمة: ${e.message}")
+                    null
+                } ?: continue
 
                 val left = (piece.left / 100.0 * page.canvasWidth).toInt()
                 val top = (piece.top / 100.0 * page.canvasHeight).toInt()
@@ -761,9 +778,9 @@ class ProChan : HttpSource() {
                 canvas.drawBitmap(bmp, null, Rect(left, top, right, bottom), null)
                 bmp.recycle()
                 drewAny = true
-            } catch (e: Exception) {
-                Log.e("ProChan-Debug", "خطأ في تحميل قطعة الصورة المقسّمة: ${e.message}")
             }
+        } finally {
+            pool.shutdown()
         }
 
         if (!drewAny) {
@@ -775,6 +792,37 @@ class ProChan : HttpSource() {
         result.compress(Bitmap.CompressFormat.JPEG, 90, out)
         result.recycle()
         return out.toByteArray()
+    }
+
+    /**
+     * يحمّل قطعة صورة واحدة مع الترويسات الصحيحة (Referer/User-Agent/Accept)، ويعيد
+     * المحاولة تلقائياً حتى 3 مرات مع تأخير متزايد عند فشل مؤقت (شبكة/429/5xx)، بدل
+     * التخلي عن القطعة من أول فشل كما كان يحدث سابقاً.
+     */
+    private fun fetchTileBitmap(url: String, pieceHeaders: Headers, attempt: Int = 1): Bitmap? {
+        try {
+            val resp = client.newCall(GET(url, pieceHeaders)).execute()
+            if (!resp.isSuccessful) {
+                val code = resp.code
+                resp.close()
+                if (attempt < 3) {
+                    Thread.sleep(300L * attempt)
+                    return fetchTileBitmap(url, pieceHeaders, attempt + 1)
+                }
+                Log.e("ProChan-Debug", "فشل تحميل قطعة صورة نهائياً بعد 3 محاولات (HTTP $code): $url")
+                return null
+            }
+            val bytes = resp.body.bytes()
+            resp.close()
+            return decodeAvif(bytes)
+        } catch (e: Exception) {
+            if (attempt < 3) {
+                Thread.sleep(300L * attempt)
+                return fetchTileBitmap(url, pieceHeaders, attempt + 1)
+            }
+            Log.e("ProChan-Debug", "فشل تحميل قطعة صورة نهائياً بعد 3 محاولات: ${e.message}")
+            return null
+        }
     }
 
     // =================================================================
@@ -792,7 +840,11 @@ class ProChan : HttpSource() {
         val mapJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val map = json.decodeFromString<ScrambledMap>(mapJson)
 
-        val mergedBytes = reconstructPage(map)
+        // نفس إصلاح الصفحات المقسّمة أعلاه: نستخدم ترويسات الطلب الأصلي الصحيحة بدل
+        // طلبات "عارية" بلا Referer/User-Agent كانت تُفقد بصمت جزءاً من القطع.
+        val pieceHeaders = request.headers
+
+        val mergedBytes = reconstructPage(map, pieceHeaders)
             ?: return Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
@@ -810,7 +862,7 @@ class ProChan : HttpSource() {
             .build()
     }
 
-    private fun reconstructPage(map: ScrambledMap): ByteArray? {
+    private fun reconstructPage(map: ScrambledMap, pieceHeaders: Headers): ByteArray? {
         val totalW = map.dim.getOrElse(0) { 800 }
         val totalH = map.dim.getOrElse(1) { 1200 }
         val n = map.pieces.size
@@ -818,22 +870,23 @@ class ProChan : HttpSource() {
 
         val rawBitmaps = arrayOfNulls<Bitmap>(n)
         try {
-            for (i in 0 until n) {
-                try {
-                    val request = GET(map.pieces[i])
-                    val resp = client.newCall(request).execute()
-                    
-                    if (!resp.isSuccessful) {
-                        resp.close()
-                        continue
-                    }
-                    
-                    val bytes = resp.body.bytes()
-                    resp.close()
-                    rawBitmaps[i] = decodeAvif(bytes)
-                } catch (e: Exception) {
-                    Log.e("ProChan-Debug", "خطأ في تحميل القطعة $i: ${e.message}")
+            // تحميل متوازٍ + إعادة محاولة لكل قطعة (نفس منطق الصفحات المقسّمة أعلاه)،
+            // بدل التتابع بلا ترويسات ولا إعادة محاولة الذي كان يُفقد قطعاً كثيرة.
+            val pool = Executors.newFixedThreadPool(minOf(n, 6))
+            try {
+                val futures = (0 until n).map { i ->
+                    pool.submit<Bitmap?> { fetchTileBitmap(map.pieces[i], pieceHeaders) }
                 }
+                for (i in 0 until n) {
+                    rawBitmaps[i] = try {
+                        futures[i].get(25, TimeUnit.SECONDS)
+                    } catch (e: Exception) {
+                        Log.e("ProChan-Debug", "انتهت مهلة تحميل القطعة $i: ${e.message}")
+                        null
+                    }
+                }
+            } finally {
+                pool.shutdown()
             }
 
             val orderedBitmaps = Array(n) { pos ->
