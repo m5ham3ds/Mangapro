@@ -52,7 +52,7 @@ import javax.crypto.spec.SecretKeySpec
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
-    private val domain = "procomic.net"
+    private val domain = "procomic.pro"
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
     override val versionId = 10
@@ -60,8 +60,8 @@ class ProChan : HttpSource() {
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
-        private const val SCRAMBLED_SCHEME = "https://procomic.net/__scrambled__/?map="
-        private const val TILED_SCHEME = "https://procomic.net/__tiled__/?map="
+        private const val SCRAMBLED_SCHEME = "https://procomic.pro/__scrambled__/?map="
+        private const val TILED_SCHEME = "https://procomic.pro/__tiled__/?map="
     }
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
