@@ -419,21 +419,22 @@ class ProChan : HttpSource() {
 
     private fun unescapeHtmlUrl(url: String) = url.replace("&amp;", "&").replace("\\/", "/")
 
-    /**
-     * يمرّ على مقاطع الـ HTML بالترتيب الذي تظهر فيه (صفحات عادية أو مقسّمة)
-     * ويبني قائمة [Page] كاملة ومرتّبة دون أي طلب شبكة إضافي.
-     */
-    private fun extractChapterPagesFromHtml(html: String, chapterUrl: String): List<Page> {
-        data class Unit(val start: Int, val page: Page?)
+    /** تمثيل خام لصفحة واحدة قبل ترميزها لـ [Page]، يُستخدم أيضاً عند إعادة تحديث التوكنات المنتهية. */
+    private sealed class RawPageUnit {
+        data class Simple(val imageUrl: String) : RawPageUnit()
+        data class Tiled(val canvasWidth: Int, val canvasHeight: Int, val pieces: List<TiledPiece>) : RawPageUnit()
+    }
 
-        var index = 0
-        val units = mutableListOf<Unit>()
+    /** يستخرج كل وحدات الصفحة الخام بالترتيب الذي تظهر فيه في الـ HTML، بلا أي ترميز. */
+    private fun extractRawPageUnits(html: String): List<RawPageUnit> {
+        data class Positioned(val start: Int, val unit: RawPageUnit?)
+        val units = mutableListOf<Positioned>()
 
         simplePageBlockRegex.findAll(html).forEach { match ->
             val content = match.groupValues[1]
             val srcs = imgSrcRegex.findAll(content).map { unescapeHtmlUrl(it.groupValues[1]) }.toList()
             val chosen = srcs.firstOrNull { "desktop" in it } ?: srcs.firstOrNull()
-            units.add(Unit(match.range.first, chosen?.let { Page(0, chapterUrl, it) }))
+            units.add(Positioned(match.range.first, chosen?.let { RawPageUnit.Simple(it) }))
         }
 
         tiledPageBlockRegex.findAll(html).forEach { match ->
@@ -452,17 +453,36 @@ class ProChan : HttpSource() {
                 )
             }.toList()
 
-            val page = if (pieces.isNotEmpty()) {
-                Page(0, chapterUrl, encodeTiledPage(TiledPage(canvasWidth, canvasHeight, pieces)))
-            } else {
-                null
-            }
-            units.add(Unit(match.range.first, page))
+            val unit = if (pieces.isNotEmpty()) RawPageUnit.Tiled(canvasWidth, canvasHeight, pieces) else null
+            units.add(Positioned(match.range.first, unit))
         }
 
-        return units.sortedBy { it.start }
-            .mapNotNull { it.page }
-            .map { page -> Page((index++), page.url, page.imageUrl) }
+        return units.sortedBy { it.start }.mapNotNull { it.unit }
+    }
+
+    /**
+     * يمرّ على مقاطع الـ HTML بالترتيب الذي تظهر فيه (صفحات عادية أو مقسّمة)
+     * ويبني قائمة [Page] كاملة ومرتّبة دون أي طلب شبكة إضافي.
+     *
+     * مهم: روابط قطع الصفحات المقسّمة (tiled) موقّعة برمز "token" ووقت انتهاء "expires"
+     * قصير الأمد صادر عن الخادم لحظة توليد هذا الـ HTML. إن مرّ وقت كافٍ بين فتح الفصل
+     * وقراءة صفحاته الأخيرة فعلياً (قراءة طويلة، أو تحميل مسبق للفصل)، تنتهي صلاحية هذه
+     * الروابط، ويستجيب الخادم عندها بصورة بديلة/عامة بدل الصورة الحقيقية — وهو بالضبط
+     * سبب ظهور "صورة مكررة بدل تكملة الفصل" التي أبلغ عنها المستخدم. لهذا السبب نحفظ
+     * chapterUrl و pageIndex داخل كل [TiledPage] مرمّزة، ليتمكن تحميل الصورة لاحقاً (في
+     * tiledImageInterceptor) من اكتشاف التوكنات المنتهية وإعادة جلب رابط جديد صالح لنفس
+     * الصفحة تحديداً بدل استخدام الرابط القديم المنتهي.
+     */
+    private fun extractChapterPagesFromHtml(html: String, chapterUrl: String): List<Page> {
+        return extractRawPageUnits(html).mapIndexed { pageIndex, unit ->
+            val imageUrl = when (unit) {
+                is RawPageUnit.Simple -> unit.imageUrl
+                is RawPageUnit.Tiled -> encodeTiledPage(
+                    TiledPage(unit.canvasWidth, unit.canvasHeight, unit.pieces, chapterUrl, pageIndex),
+                )
+            }
+            Page(pageIndex, chapterUrl, imageUrl)
+        }
     }
 
     private fun encodeTiledPage(page: TiledPage): String {
@@ -745,7 +765,13 @@ class ProChan : HttpSource() {
      * (left/top/width/height) وأبعاد الـ canvas بالبكسل، كما هي موجودة فعلياً في HTML
      * الموقع — لا يوجد أي تشفير أو ترتيب عشوائي يحتاج فك تشفير في هذا النوع من الصفحات.
      */
-    private fun reconstructTiledPage(page: TiledPage, pieceHeaders: Headers): ByteArray? {
+    private fun reconstructTiledPage(originalPage: TiledPage, pieceHeaders: Headers): ByteArray? {
+        // إن كانت أي من روابط قطع هذه الصفحة تحمل توكناً أوشك على الانتهاء (أو انتهى
+        // فعلاً)، نجلب نسخة جديدة من صفحة الفصل، ونستخرج توكنات طازجة لنفس هذه الصفحة
+        // تحديداً (بنفس ترتيبها/فهرسها)، بدل استخدام الروابط القديمة المنتهية التي يردّ
+        // عليها الخادم بصورة بديلة/عامة — وهذا بالضبط ما كان يظهر كـ"صورة مكررة".
+        val page = refreshTiledPageIfNeeded(originalPage)
+
         if (page.pieces.isEmpty() || page.canvasWidth <= 0 || page.canvasHeight <= 0) return null
 
         val result = Bitmap.createBitmap(page.canvasWidth, page.canvasHeight, Bitmap.Config.ARGB_8888)
@@ -823,6 +849,64 @@ class ProChan : HttpSource() {
             Log.e("ProChan-Debug", "فشل تحميل قطعة صورة نهائياً بعد 3 محاولات: ${e.message}")
             return null
         }
+    }
+
+    // =================================================================
+    // تحديث التوكنات المنتهية (سبب "الصورة المكررة")
+    // =================================================================
+    // كل رابط قطعة صورة مقسّمة يحمل معامِلَي "expires" (وقت انتهاء بالثواني منذ
+    // Epoch) و"token" (توقيع). هذه التوكنات صادرة لحظة توليد HTML الفصل، وتنتهي
+    // صلاحيتها بعد فترة قصيرة. إن استغرقت القراءة الفعلية للفصل وقتاً أطول من ذلك
+    // (فصل طويل، أو قراءة متأخرة عن وقت فتحه)، يرفض الخادم الرابط المنتهي ويردّ بصورة
+    // بديلة/عامة بدل الصورة الحقيقية — فتظهر نفس الصورة مكررة بدل تكملة الفصل.
+    private val expiresParamRegex = Regex("""[?&]expires=(\d+)""")
+
+    /** نعتبر التوكن على وشك الانتهاء إن تبقّى له أقل من هامش أمان معيّن، لضمان اكتمال التحميل قبل الرفض الفعلي. */
+    private fun isTokenExpiringSoon(url: String, safetyMarginSeconds: Long = 30L): Boolean {
+        val expiresAt = expiresParamRegex.find(url)?.groupValues?.get(1)?.toLongOrNull() ?: return false
+        val nowSeconds = System.currentTimeMillis() / 1000
+        return expiresAt - nowSeconds < safetyMarginSeconds
+    }
+
+    // تخزين مؤقت قصير الأمد لوحدات صفحات الفصل الطازجة، مفتاحه رابط الفصل، لتفادي
+    // إعادة جلب وتحليل HTML الفصل كاملاً من جديد لكل صفحة على حدة إن احتاجت عدة صفحات
+    // متتالية تحديثاً في نفس الفترة الزمنية القصيرة (كما يحدث عادة أثناء القراءة).
+    private val freshPageUnitsCache = ConcurrentHashMap<String, Pair<Long, List<RawPageUnit>>>()
+    private val freshUnitsCacheTtlMillis = 60_000L
+
+    private fun fetchFreshPageUnits(chapterUrl: String): List<RawPageUnit>? {
+        val now = System.currentTimeMillis()
+        freshPageUnitsCache[chapterUrl]?.let { (ts, units) ->
+            if (now - ts < freshUnitsCacheTtlMillis) return units
+        }
+
+        return try {
+            val resp = client.newCall(GET(chapterUrl, headers)).execute()
+            if (!resp.isSuccessful) {
+                resp.close()
+                return null
+            }
+            val html = resp.body.string()
+            resp.close()
+            val units = extractRawPageUnits(html)
+            freshPageUnitsCache[chapterUrl] = now to units
+            units
+        } catch (e: Exception) {
+            Log.e("ProChan-Debug", "فشل تحديث توكنات الفصل (إعادة جلب الفصل): ${e.message}")
+            null
+        }
+    }
+
+    /** يعيد نفس الصفحة إن كانت توكناتها ما زالت صالحة، أو نسخة طازجة بتوكنات جديدة لنفس رقم الصفحة إن انتهت صلاحيتها. */
+    private fun refreshTiledPageIfNeeded(page: TiledPage): TiledPage {
+        if (page.chapterUrl.isEmpty() || page.pageIndex < 0) return page
+        val needsRefresh = page.pieces.any { isTokenExpiringSoon(it.url) }
+        if (!needsRefresh) return page
+
+        val freshUnits = fetchFreshPageUnits(page.chapterUrl) ?: return page
+        val freshUnit = freshUnits.getOrNull(page.pageIndex) as? RawPageUnit.Tiled ?: return page
+
+        return TiledPage(freshUnit.canvasWidth, freshUnit.canvasHeight, freshUnit.pieces, page.chapterUrl, page.pageIndex)
     }
 
     // =================================================================
@@ -1099,4 +1183,8 @@ data class TiledPage(
     val canvasWidth: Int,
     val canvasHeight: Int,
     val pieces: List<TiledPiece>,
+    // اسم الحقلين الجديدين يبدأ بقيمة افتراضية للحفاظ على توافق أي بيانات مرمّزة/محفوظة
+    // مسبقاً؛ يُستخدمان فقط لإعادة جلب توكن جديد لنفس الصفحة تحديداً إن انتهت صلاحيته.
+    val chapterUrl: String = "",
+    val pageIndex: Int = -1,
 )
