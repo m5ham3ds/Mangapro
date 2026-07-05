@@ -53,9 +53,15 @@ class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
     private val domain = "procomic.pro"
+
+    // ملاحظة: نطاق الموقع الرئيسي (تصفح/تفاصيل/فصول) انتقل إلى procomic.pro، لكن خادم
+    // صور الأغلفة (CDN) ما زال يعمل تحت procomic.net (مثل cdn3.procomic.net) — لذلك يجب
+    // إبقاء نطاق الصور منفصلاً تماماً عن نطاق الموقع الأساسي.
+    private val cdnDomain = "procomic.net"
+
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 10
+    override val versionId = 11
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -119,7 +125,11 @@ class ProChan : HttpSource() {
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         if (query.startsWith("https://")) {
             val url = query.toHttpUrl()
-            val path = url.pathSegments
+            // الموقع أصبح يستخدم بادئة لغة اختيارية في الروابط (/ar/series/... أو
+            // /en/series/...)، فنتجاوزها هنا إن وُجدت قبل التحقق من بنية الرابط.
+            val path = url.pathSegments.let { segments ->
+                if (segments.firstOrNull() in setOf("ar", "en")) segments.drop(1) else segments
+            }
             if (url.host == domain && path.size >= 4 && path[0] == "series") {
                 val type = path[1]
                 if (type !in SUPPORTED_TYPES) throw Exception("نوع غير مدعوم: $type")
@@ -159,7 +169,7 @@ class ProChan : HttpSource() {
                             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
                             title = manga.title
                             thumbnail_url = (manga.coverImageApp?.desktop ?: manga.coverImage)?.let {
-                                if (it.startsWith("/")) manga.cdn?.let { cdn -> "https://$cdn.$domain$it" } else it
+                                if (it.startsWith("/")) manga.cdn?.let { cdn -> "https://$cdn.$cdnDomain$it" } else it
                             }
                         }
                     }.toList()
@@ -246,7 +256,7 @@ class ProChan : HttpSource() {
                 else -> SManga.UNKNOWN
             }
             thumbnail_url = (manga.coverImageApp?.desktop ?: manga.metadata.coverImage)?.let {
-                if (it.startsWith("/")) manga.cdn?.let { cdn -> "https://$cdn.$domain$it" } else it
+                if (it.startsWith("/")) manga.cdn?.let { cdn -> "https://$cdn.$cdnDomain$it" } else it
             }
             initialized = true
         }
@@ -265,23 +275,40 @@ class ProChan : HttpSource() {
             throw Exception("HTTP ${response.code}")
         }
 
-        val data = response.extractNextJs<InitialChapters>()!!
+        // مهم جداً: لا نستخرج type/id/slug من مقاطع رابط الاستجابة (response.request.url)
+        // لأن الموقع أصبح يحوّل (301/302 redirect) أي رابط بلا بادئة لغة تلقائياً إلى
+        // نسخة ببادئة لغة (مثل procomic.pro/series/... → procomic.pro/ar/series/...)
+        // حسب Accept-Language، وOkHttp يتبع هذا التحويل تلقائياً بشكل شفّاف. هذا يجعل
+        // الرابط النهائي يحتوي مقطعاً إضافياً ("ar")، فيُزيح كل الفهارس بخانة واحدة
+        // ويُفسد بناء رابط ترقيم الفصول بالكامل (وهو سبب خطأ "فشل جلب الصفحة 2 - 404").
+        // الحل: نأخذ type/id/slug مباشرة من بيانات JSON نفسها (Series)، وهي غير متأثرة
+        // بهذا التحويل مطلقاً بخلاف رابط الطلب.
+        val html = response.body.string()
+        val htmlMediaType = "text/html; charset=utf-8".toMediaType()
+        fun freshHtmlResponse() = response.newBuilder()
+            .body(html.toResponseBody(htmlMediaType))
+            .build()
+
+        val seriesInfo = freshHtmlResponse().extractNextJs<Series>()!!.series
+        val data = freshHtmlResponse().extractNextJs<InitialChapters>()!!
         val chapters = data.initialChapters.toMutableList()
         val size = chapters.size
         var page = 2
-        val type = response.request.url.pathSegments[1]
-        val id = response.request.url.pathSegments[2]
-        val slug = response.request.url.pathSegments[3]
+        val type = seriesInfo.type
+        val id = seriesInfo.id.toString()
+        val slug = seriesInfo.slug
 
         while (data.totalChapters > chapters.size) {
-            val request = GET("$baseUrl/api/public/$type/$id/chapters?page=${page++}&limit=$size&order=desc", headers)
+            val requestUrl = "$baseUrl/api/public/$type/$id/chapters?page=${page++}&limit=$size&order=desc"
+            val request = GET(requestUrl, headers)
             val nextResponse = client.newCall(request).execute()
             if (!nextResponse.isSuccessful) {
+                val code = nextResponse.code
                 nextResponse.close()
-                if (nextResponse.code == 403) {
+                if (code == 403) {
                     throw Exception("⚠️ HTTP 403 عند جلب الفصول\n\n🔧 الحل: افتح WebView وتصفح الموقع ثم أعد المحاولة.")
                 }
-                throw Exception("HTTP ${nextResponse.code} - فشل جلب الصفحة ${page - 1}")
+                throw Exception("HTTP $code - فشل جلب الصفحة ${page - 1}\nالرابط: $requestUrl")
             }
             val nextChapters = nextResponse.parseAs<Data<List<Chapter>>>()
             chapters.addAll(nextChapters.data)
@@ -338,6 +365,13 @@ class ProChan : HttpSource() {
             // نفسه قد حصل عليها. لهذا كانت الصور المؤجلة تفشل دائماً إلا بعد فتح WebView يدوياً.
             val request = pageListRequest(chapter)
 
+            // نستخرج seriesId/chapterId من رابط الطلب *الأصلي* قبل إرساله، لا من رابط
+            // الاستجابة النهائي بعد أي تحويل لغة محتمل (/ar/ أو /en/) — لنفس السبب
+            // الذي عالجناه في chapterListParse أعلاه.
+            val requestSegments = request.url.pathSegments
+            val seriesId = requestSegments.getOrNull(2) ?: ""
+            val chapterId = requestSegments.getOrNull(4) ?: ""
+
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
                 response.close()
@@ -346,7 +380,7 @@ class ProChan : HttpSource() {
                 }
                 throw Exception("HTTP ${response.code} - فشل جلب صفحات الفصل")
             }
-            pageListParse(response)
+            parsePageList(response, seriesId, chapterId)
         }
     }
 
@@ -465,10 +499,15 @@ class ProChan : HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
+        // احتياطي فقط: هذا المسار قد يُستدعى مباشرة من إطار العمل خارج fetchPageList
+        // الذي نتحكم به بالكامل أعلاه، فنحاول أفضل استخراج ممكن من رابط الاستجابة.
+        val segments = response.request.url.pathSegments
+        return parsePageList(response, segments.getOrNull(2) ?: "", segments.getOrNull(4) ?: "")
+    }
+
+    private fun parsePageList(response: Response, seriesId: String, chapterId: String): List<Page> {
         val html = response.body.string()
         val chapterUrl = response.request.url.toString()
-        val seriesId = response.request.url.pathSegments[2]
-        val chapterId = response.request.url.pathSegments[4]
 
         val pages = extractChapterPagesFromHtml(html, chapterUrl)
 
