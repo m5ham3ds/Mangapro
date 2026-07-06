@@ -54,16 +54,24 @@ import javax.crypto.spec.SecretKeySpec
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
-    private val domain = "procomic.pro"
+    // ملاحظة مهمة: الموقع بدّل نطاقه الرئيسي أكثر من مرة خلال فترة قصيرة (من
+    // procomic.net إلى procomic.pro، والآن يبدو أنه رجع إلى procomic.net فعلياً — هذا
+    // مؤكد من فحص <link rel="canonical"> و og:url في مصدر صفحة حيّة فعلية أرسلها
+    // المستخدم بتاريخ اليوم). لهذا السبب:
+    // - اعتمدنا procomic.net كنطاق أساسي الآن (يطابق ما يقدّمه الموقع فعلياً حالياً).
+    // - أبقينا procomic.pro كنطاق بديل (altDomain) يُجرَّب تلقائياً عبر
+    //    domainFallbackInterceptor أدناه كلما أرجع النطاق الأساسي 404/410 — بدل الانهيار
+    //    الكامل في كل مرة يبدّل فيها الموقع نطاقه مجدداً مستقبلاً.
+    private val domain = "procomic.net"
+    private val altDomain = "procomic.pro"
 
-    // ملاحظة: نطاق الموقع الرئيسي (تصفح/تفاصيل/فصول) انتقل إلى procomic.pro، لكن خادم
-    // صور الأغلفة (CDN) ما زال يعمل تحت procomic.net (مثل cdn3.procomic.net) — لذلك يجب
-    // إبقاء نطاق الصور منفصلاً تماماً عن نطاق الموقع الأساسي.
+    // نطاق صور الأغلفة (CDN) بصيغة "cdn3.procomic.net" ونحوها — نفس النص الأساسي
+    // لـ procomic.net، لكن يُستخدم هنا كلاحقة اسم مضيف فرعي، لا كنطاق مستقل.
     private val cdnDomain = "procomic.net"
 
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 11
+    override val versionId = 12
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -73,6 +81,7 @@ class ProChan : HttpSource() {
     }
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
+        .addInterceptor(::domainFallbackInterceptor)
         .addInterceptor(::scrambledImageInterceptor)
         .addInterceptor(::tiledImageInterceptor)
         .addNetworkInterceptor(
@@ -82,6 +91,64 @@ class ProChan : HttpSource() {
             )
         )
         .build()
+
+    /**
+     * يحاول تلقائياً النطاق البديل [altDomain] كلما أرجع النطاق الأساسي [domain] رمز
+     * 404 (غير موجود) أو 410 (اختفى نهائياً) — هذا بالضبط ما يحدث الآن لبعض السلاسل:
+     * تُطلب صفحاتها عبر procomic.pro فيرجع 410، بينما هي موجودة وتعمل فعلياً على
+     * procomic.net. بهذا لا تنهار الإضافة بالكامل إن بدّل الموقع نطاقه (كلياً أو
+     * جزئياً لبعض السلاسل) مرة أخرى مستقبلاً.
+     */
+    private fun domainFallbackInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+
+        // نستثني روابطنا الداخلية الوهمية (التي تمثّل صوراً مركّبة محلياً ولا تُطلب من
+        // الشبكة فعلياً) من أي محاولة تبديل نطاق، فهي ليست طلبات حقيقية للموقع.
+        val path = request.url.encodedPath
+        if (path.startsWith("/__tiled__") || path.startsWith("/__scrambled__")) {
+            return chain.proceed(request)
+        }
+
+        if (request.url.host != domain) {
+            return chain.proceed(request)
+        }
+
+        val response = chain.proceed(request)
+        if (response.code != 404 && response.code != 410) {
+            return response
+        }
+
+        // نحتفظ برمز ورسالة الفشل الأصليين قبل إغلاق الاستجابة، لنستخدمهما لاحقاً إن
+        // فشل النطاق البديل أيضاً — بدل إعادة إرسال الطلب الأصلي مرة ثالثة بلا فائدة
+        // (نتيجته معروفة مسبقاً).
+        val originalCode = response.code
+        val originalMessage = response.message
+        response.close()
+
+        val fallbackUrl = request.url.newBuilder().host(altDomain).build()
+        val fallbackRequest = request.newBuilder().url(fallbackUrl).build()
+
+        fun originalFailureResponse() = Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(originalCode)
+            .message(originalMessage)
+            .body("".toResponseBody(null))
+            .build()
+
+        return try {
+            val fallbackResponse = chain.proceed(fallbackRequest)
+            if (fallbackResponse.isSuccessful) {
+                fallbackResponse
+            } else {
+                fallbackResponse.close()
+                originalFailureResponse()
+            }
+        } catch (e: Exception) {
+            Log.e("ProChan-Debug", "فشلت محاولة النطاق البديل ($altDomain) أيضاً: ${e.message}")
+            originalFailureResponse()
+        }
+    }
 
     // ======================== ترويسات محسّنة لمحاكاة متصفح هاتف أندرويد ========================
     override fun headersBuilder(): Headers.Builder {
@@ -132,7 +199,7 @@ class ProChan : HttpSource() {
             val path = url.pathSegments.let { segments ->
                 if (segments.firstOrNull() in setOf("ar", "en")) segments.drop(1) else segments
             }
-            if (url.host == domain && path.size >= 4 && path[0] == "series") {
+            if (url.host in setOf(domain, altDomain) && path.size >= 4 && path[0] == "series") {
                 val type = path[1]
                 if (type !in SUPPORTED_TYPES) throw Exception("نوع غير مدعوم: $type")
                 val mangaId = path[2]
