@@ -21,7 +21,6 @@ import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.Callback
@@ -54,14 +53,13 @@ import javax.crypto.spec.SecretKeySpec
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
-    // نطاق الموقع الأساسي
     private val domain = "procomic.pro"
     private val altDomain = "procomic.net"
     private val cdnDomain = "procomic.net"
 
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 18
+    override val versionId = 19
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -84,13 +82,9 @@ class ProChan : HttpSource() {
         )
         .build()
 
-    // =====================================================================
-    // Interceptor للتبديل بين النطاقات
-    // =====================================================================
     private fun domainFallbackInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val path = request.url.encodedPath
-        // نستثني الروابط الداخلية الوهمية
         if (path.startsWith("/__tiled__") || path.startsWith("/__scrambled__") || path.startsWith("/__simple__")) {
             return chain.proceed(request)
         }
@@ -132,9 +126,6 @@ class ProChan : HttpSource() {
         }
     }
 
-    // =====================================================================
-    // ترويسات HTTP
-    // =====================================================================
     override fun headersBuilder(): Headers.Builder {
         return Headers.Builder()
             .set("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
@@ -149,9 +140,6 @@ class ProChan : HttpSource() {
         .set("rsc", "1")
         .build()
 
-    // =====================================================================
-    // البحث والقوائم
-    // =====================================================================
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 2
@@ -238,9 +226,6 @@ class ProChan : HttpSource() {
         TypeFilter(), SortFilter(), YearFilter(), StatusFilter(), GenreFilter(), TagFilter(),
     )
 
-    // =====================================================================
-    // تفاصيل السلسلة
-    // =====================================================================
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
@@ -310,9 +295,6 @@ class ProChan : HttpSource() {
         }
     }
 
-    // =====================================================================
-    // قائمة الفصول
-    // =====================================================================
     override fun chapterListRequest(manga: SManga) = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
@@ -393,9 +375,6 @@ class ProChan : HttpSource() {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
-    // =====================================================================
-    // استخراج صفحات الفصل
-    // =====================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
 
     override fun getChapterUrl(chapter: SChapter): String {
@@ -422,7 +401,10 @@ class ProChan : HttpSource() {
         }
     }
 
-    // أنماط regex لاستخراج الصفحات
+    // =====================================================================
+    // استخراج صفحات الفصل من الـ HTML مباشرة
+    // =====================================================================
+
     private val simplePageBlockRegex = Regex(
         """<div class="leading-\[0\]">((?:<img[^>]*?>)+?)</div>""",
     )
@@ -436,13 +418,11 @@ class ProChan : HttpSource() {
 
     private fun unescapeHtmlUrl(url: String) = url.replace("&amp;", "&").replace("\\/", "/")
 
-    /** تمثيل خام لصفحة واحدة */
     private sealed class RawPageUnit {
         data class Simple(val imageUrl: String) : RawPageUnit()
         data class Tiled(val canvasWidth: Int, val canvasHeight: Int, val pieces: List<TiledPiece>) : RawPageUnit()
     }
 
-    /** يستخرج كل وحدات الصفحة الخام بالترتيب */
     private fun extractRawPageUnits(html: String): List<RawPageUnit> {
         data class Positioned(val start: Int, val unit: RawPageUnit?)
         val units = mutableListOf<Positioned>()
@@ -477,16 +457,11 @@ class ProChan : HttpSource() {
         return units.sortedBy { it.start }.mapNotNull { it.unit }
     }
 
-    /**
-     * تحويل الوحدات الخام إلى قائمة Pages.
-     * الصفحات البسيطة التي تحتوي على توكنات يتم ترميزها بـ SIMPLE_SCHEME لتحديثها لاحقاً.
-     */
     private fun extractChapterPagesFromHtml(html: String, chapterUrl: String): List<Page> {
         return extractRawPageUnits(html).mapIndexed { pageIndex, unit ->
             val imageUrl = when (unit) {
                 is RawPageUnit.Simple -> {
                     val url = unit.imageUrl
-                    // إذا كان الرابط يحتوي على expires=، نقوم بتشفيره لتحديثه لاحقاً
                     if (url.contains("expires=")) {
                         encodeSimplePage(SimplePage(chapterUrl, pageIndex, url))
                     } else {
@@ -529,7 +504,6 @@ class ProChan : HttpSource() {
         val pages = extractChapterPagesFromHtml(html, chapterUrl)
 
         val finalPages = pages.ifEmpty {
-            // مسار احتياطي قديم (نادراً ما يستخدم)
             legacyFallbackPages(html, chapterUrl, chapterId)
         }
 
@@ -537,17 +511,10 @@ class ProChan : HttpSource() {
         return finalPages
     }
 
-    // =====================================================================
-    // المسار الاحتياطي القديم (قد لا يعمل)
-    // =====================================================================
     private fun legacyFallbackPages(html: String, chapterUrl: String, chapterId: String): List<Page> {
-        // نسخة مختصرة، في العادة لن نصل هنا
         throw Exception("⚠️ لم يتم العثور على أي صفحات لهذا الفصل.\n\n🔧 الحل: افتح WebView من إعدادات الامتداد، تصفح هذا الفصل يدوياً، ثم أعد المحاولة، وإن استمرت المشكلة فقد يكون هيكل الموقع قد تغيّر.")
     }
 
-    // =====================================================================
-    // طلب الصورة
-    // =====================================================================
     override fun imageRequest(page: Page): Request {
         val headers = headersBuilder()
             .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
@@ -571,17 +538,14 @@ class ProChan : HttpSource() {
         val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val simplePage = json.decodeFromString<SimplePage>(pageJson)
 
-        // إذا كان الرابط لا يزال صالحاً، استخدمه مباشرة
         if (!isTokenExpiringSoon(simplePage.originalUrl)) {
             val newRequest = request.newBuilder().url(simplePage.originalUrl).build()
             return chain.proceed(newRequest)
         }
 
-        // جلب صفحة جديدة للحصول على رابط محدث
         val freshUnits = fetchFreshPageUnits(simplePage.chapterUrl, noCache = true)
         val freshUnit = freshUnits?.getOrNull(simplePage.pageIndex) as? RawPageUnit.Simple
         if (freshUnit == null) {
-            // فشل التحديث: ارجع الصورة القديمة (قد تكون مكررة، لكن أفضل من فشل كامل)
             val fallbackRequest = request.newBuilder().url(simplePage.originalUrl).build()
             return chain.proceed(fallbackRequest)
         }
@@ -604,7 +568,6 @@ class ProChan : HttpSource() {
         val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val tiledPage = json.decodeFromString<TiledPage>(pageJson)
 
-        // تحديث التوكنات إذا لزم الأمر
         val refreshedPage = refreshTiledPageIfNeeded(tiledPage)
         if (refreshedPage.pieces.isEmpty()) {
             return Response.Builder()
@@ -709,7 +672,7 @@ class ProChan : HttpSource() {
     }
 
     // =====================================================================
-    // SCRAMBLED IMAGE INTERCEPTOR (قديم، نادر الاستخدام)
+    // SCRAMBLED IMAGE INTERCEPTOR
     // =====================================================================
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -862,7 +825,6 @@ class ProChan : HttpSource() {
     // =====================================================================
     private val expiresParamRegex = Regex("""[?&]expires=(\d+)""")
 
-    // هامش أمان كبير (دقيقتان) لتجنب الانتهاء أثناء التحميل
     private fun isTokenExpiringSoon(url: String, safetyMarginSeconds: Long = 120L): Boolean {
         val expiresAt = expiresParamRegex.find(url)?.groupValues?.get(1)?.toLongOrNull() ?: return false
         val nowSeconds = System.currentTimeMillis() / 1000
@@ -870,7 +832,7 @@ class ProChan : HttpSource() {
     }
 
     private val freshPageUnitsCache = ConcurrentHashMap<String, Pair<Long, List<RawPageUnit>>>()
-    private val freshUnitsCacheTtlMillis = 30_000L // 30 ثانية
+    private val freshUnitsCacheTtlMillis = 30_000L
 
     private fun fetchFreshPageUnits(chapterUrl: String, noCache: Boolean = false): List<RawPageUnit>? {
         val now = System.currentTimeMillis()
@@ -881,7 +843,6 @@ class ProChan : HttpSource() {
         }
 
         return try {
-            // إضافة معلمة عشوائية لتجاوز الكاش
             val cacheBuster = "?_cb=${System.currentTimeMillis()}"
             val url = if (chapterUrl.contains("?")) "$chapterUrl$cacheBuster" else "$chapterUrl$cacheBuster"
             val resp = client.newCall(GET(url, headers)).execute()
@@ -1012,315 +973,7 @@ class ProChan : HttpSource() {
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
 
-// =====================================================================
-// تعريفات البيانات
-// =====================================================================
 private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "comic")
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 private val MOBILE_REGEX = Regex("mobile|android|iphone|ipad|ipod", RegexOption.IGNORE_CASE)
 private val TABLES_REGEX = Regex("tablet", RegexOption.IGNORE_CASE)
-
-@Serializable
-data class TiledPiece(
-    val url: String,
-    val left: Double,
-    val top: Double,
-    val width: Double,
-    val height: Double,
-)
-
-@Serializable
-data class TiledPage(
-    val canvasWidth: Int,
-    val canvasHeight: Int,
-    val pieces: List<TiledPiece>,
-    val chapterUrl: String = "",
-    val pageIndex: Int = -1,
-)
-
-@Serializable
-data class SimplePage(
-    val chapterUrl: String,
-    val pageIndex: Int,
-    val originalUrl: String,
-)
-
-// =====================================================================
-// باقي تعريفات البيانات (مأخوذة من الكود الأصلي)
-// =====================================================================
-@Serializable
-data class MetaData<T>(
-    val data: List<T>,
-    val meta: Meta,
-)
-
-@Serializable
-data class Meta(
-    val total: Int,
-    val page: Int,
-    val lastPage: Int,
-    val hasNextPage: Boolean,
-)
-
-@Serializable
-data class BrowseManga(
-    val id: Int,
-    val title: String,
-    val slug: String,
-    val type: String,
-    val progress: String,
-    val cdn: String? = null,
-    val coverImage: String? = null,
-    val coverImageApp: CoverImageApp? = null,
-    val metadata: BrowseMetadata,
-)
-
-@Serializable
-data class BrowseMetadata(
-    val genres: List<String> = emptyList(),
-    val tags: List<String> = emptyList(),
-    val originalTitle: String? = null,
-)
-
-@Serializable
-data class CoverImageApp(
-    val desktop: String? = null,
-    val mobile: String? = null,
-)
-
-@Serializable
-data class Series(
-    val series: SeriesDetail,
-)
-
-@Serializable
-data class SeriesDetail(
-    val id: Int,
-    val title: String,
-    val slug: String,
-    val type: String,
-    val progress: String?,
-    val cdn: String? = null,
-    val description: String? = null,
-    val coverImageApp: CoverImageApp? = null,
-    val metadata: SeriesMetadata,
-)
-
-@Serializable
-data class SeriesMetadata(
-    val author: List<String> = emptyList(),
-    val artist: List<String> = emptyList(),
-    val altTitles: List<String> = emptyList(),
-    val originalTitle: String? = null,
-    val year: String? = null,
-    val origin: String? = null,
-    val genres: List<String> = emptyList(),
-    val tags: List<String> = emptyList(),
-    val coverImage: String? = null,
-)
-
-@Serializable
-data class InitialChapters(
-    val initialChapters: List<Chapter>,
-    val totalChapters: Int,
-)
-
-@Serializable
-data class Chapter(
-    val id: Int,
-    val number: String,
-    val title: String?,
-    val language: String,
-    val createdAt: String,
-    val uploader: String? = null,
-    val coins: Int? = null,
-)
-
-@Serializable
-data class Data<T>(
-    val data: T,
-)
-
-@Serializable
-data class ChapterUrl(
-    val id: Int,
-    val number: String,
-    val slug: String,
-)
-
-@Serializable
-data class DeferredImages(
-    val images: List<String>,
-    val maps: List<ScrambledImage>,
-)
-
-@Serializable
-data class ScrambledImage(
-    val dim: List<Int> = emptyList(),
-    val mode: String,
-    val pieces: List<String>,
-    val order: List<Int> = emptyList(),
-)
-
-@Serializable
-data class ScrambledImageToken(
-    val token: String,
-)
-
-@Serializable
-data class ScrambledImageTokenValue(
-    val iv: String,
-    val tag: String,
-    val data: String,
-    val cid: Int,
-    val m: String,
-    val v: Int,
-)
-
-@Serializable
-data class ScrambledMap(
-    val dim: List<Int> = emptyList(),
-    val mode: String,
-    val pieces: List<String>,
-    val order: List<Int> = emptyList(),
-)
-
-@Serializable
-data class ChapterDeferredResponse(
-    val success: Boolean,
-    val data: DeferredImages? = null,
-)
-
-@Serializable
-data class Key(
-    val key: String,
-)
-
-@Serializable
-data class ViewsDto(
-    val chapterId: Int?,
-    val contentId: Int,
-    val deviceType: String,
-    val surface: String,
-)
-
-// المرشحات
-class TypeFilter : Filter.Select<String>(
-    "النوع",
-    arrayOf("الكل", "مانجا", "مانهوا", "مانها", "ويب تون"),
-    arrayOf("", "manga", "manhua", "manhwa", "webtoon"),
-) {
-    val selected = if (state == 0) null else values[state]
-}
-
-class SortFilter : Filter.Select<String>(
-    "الترتيب",
-    arrayOf("آخر تحديث", "الأشهر", "الأعلى تقييماً", "الأكثر تعليقاً"),
-    arrayOf("latest", "popular", "rating", "commented"),
-) {
-    val selected get() = values[state]
-}
-
-class YearFilter : Filter.Select<String>(
-    "سنة الإصدار",
-    arrayOf("الكل") + (2025 downTo 2010).map { it.toString() },
-    arrayOf("") + (2025 downTo 2010).map { it.toString() },
-) {
-    val selected = if (state == 0) null else values[state]
-}
-
-class StatusFilter : Filter.Select<String>(
-    "الحالة",
-    arrayOf("الكل", "مستمر", "مكتمل", "متوقف"),
-    arrayOf(null, "مستمر", "مكتمل", "متوقف"),
-) {
-    val selected get() = values[state]
-}
-
-open class MultiSelectFilter(name: String, val options: List<Pair<String, String>>) :
-    Filter.Select<String>(name, options.map { it.first }.toTypedArray(), options.map { it.second }.toTypedArray()) {
-    val selected get() = if (state == 0) emptyList() else listOf(values[state])
-}
-
-class GenreFilter : MultiSelectFilter(
-    "التصنيف",
-    genres
-)
-
-class TagFilter : MultiSelectFilter(
-    "الوسم",
-    tags
-)
-
-private val genres = listOf(
-    "أكشن" to "Action",
-    "مغامرة" to "Adventure",
-    "كوميديا" to "Comedy",
-    "دراما" to "Drama",
-    "فنتازيا" to "Fantasy",
-    "حريم" to "Harem",
-    "رعب" to "Horror",
-    "خيال علمي" to "Sci-fi",
-    "رومانسية" to "Romance",
-    "شونين" to "Shounen",
-    "سينين" to "Seinen",
-    "شوجو" to "Shoujo",
-    "جوسي" to "Josei",
-    "إيتشي" to "Ecchi",
-    "فنون قتالية" to "Martial Arts",
-    "تاريخي" to "Historical",
-    "حياة مدرسية" to "School Life",
-    "شريحة من الحياة" to "Slice of Life",
-    "نفسي" to "Psychological",
-    "غموض" to "Mystery",
-    "مأساة" to "Tragedy",
-    "خارق للطبيعة" to "Supernatural",
-)
-
-private val tags = listOf(
-    "أكاديمية" to "Academy",
-    "قدرات خارقة" to "Ability Steal",
-    "مغامرون" to "Adventurers",
-    "حبس" to "Confinement",
-    "تطوير الشخصية" to "Character Growth",
-    "ثنائي متشاجر" to "Bickering Couple",
-    "ذكاء اصطناعي" to "Artificial Intelligence",
-    "بطل بارد" to "Cold Protagonist",
-    "بطل واثق" to "Confident Protagonist",
-    "بطل جبان" to "Cowardly Protagonist",
-    "بطل ماكر" to "Cunning Protagonist",
-    "بطل حازم" to "Determined Protagonist",
-    "بطل غير مبال" to "Apathetic Protagonist",
-    "بطل اجتماعي" to "Anti-social Protagonist",
-    "بطل غريب" to "Awkward Protagonist",
-    "بطل كاريزمي" to "Charismatic Protagonist",
-    "بطل طيب" to "Caring Protagonist",
-    "بطل حذر" to "Cautious Protagonist",
-    "بطل ساذج" to "Dense Protagonist",
-    "بطل غير صادق" to "Dishonest Protagonist",
-    "بطل مرتاب" to "Distrustful Protagonist",
-    "تطور سريع" to "Accelerated Growth",
-    "خطوبة مكسورة" to "Broken Engagement",
-    "زواج مرتب" to "Arranged Marriage",
-    "سكن مشترك" to "Cohabitation",
-    "خيانة" to "Betrayal",
-    "انتقام" to "Revenge",
-    "اكتئاب" to "Depression",
-    "حب الطفولة" to "Childhood Love",
-    "صداقة الطفولة" to "Childhood Friends",
-    "مشاكل عائلية" to "Complex Family Relationships",
-    "حياة عائلية" to "Family Life",
-    "قتلة مأجورون" to "Assassins",
-    "جنود" to "Army",
-    "سحر" to "Magic",
-    "شياطين" to "Demons",
-    "ملائكة" to "Angels",
-    "وحوش" to "Beasts",
-    "مخلوقات أسطورية" to "Mythical Creatures",
-    "تحول" to "Transformation",
-    "تناسخ" to "Reincarnation",
-    "قدر" to "Destiny",
-    "عالم موازي" to "Alternate World",
-    "نهاية العالم" to "Apocalypse",
-    "عالم خيالي" to "Fantasy World",
-)
