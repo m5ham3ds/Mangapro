@@ -54,32 +54,14 @@ import javax.crypto.spec.SecretKeySpec
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
-    // ملاحظة مهمة حول النطاقات (مؤكدة الآن من فحص مصدر صفحة حقيقية فعلياً، لا افتراضاً):
-    // - procomic.pro هو النطاق الذي يحتوي فعلياً على بيانات JSON الكاملة المُضمَّنة داخل
-    //   الصفحة (الفصول initialChapters وتفاصيل السلسلة series) — وهذه البيانات هي ما
-    //   تعتمد عليه طريقة عملنا بالكامل (استخراج JSON من الـ HTML مباشرة، دون استدعاء API
-    //   منفصل صراحة).
-    // - procomic.net يُقدّم لنفس مسار السلسلة نسخة "/info" (صفحة معلومات/تقييمات فقط)
-    //   لا تحتوي على initialChapters ولا series إطلاقاً — وقد تأكد هذا فعلياً بفحص مصدر
-    //   صفحة حقيقية لم تحتوِ ولا مرة واحدة على "initialChapters". والأهم: تلك الصفحة نفسها
-    //   تتضمن رابطاً داخلياً صريحاً يوجّه إلى procomic.pro لعرض السلسلة الكاملة — أي أن
-    //   الموقع نفسه يُعامل procomic.net كمرآة عرض/فهرسة خفيفة فقط، لا كنطاق وظيفي كامل.
-    // - لذلك procomic.pro هو الأساس الصحيح دائماً لطلبات تفاصيل السلسلة وقوائم الفصول،
-    //   وprocomic.net نطاق احتياطي فقط (قد يفيد لطلبات أخرى كالبحث، لكن لا يُعتمد عليه
-    //   لصفحات الفصول تحديداً).
-    // - هذا الموقع أيضاً يُغيّر نطاقاته بشكل متكرر جداً تاريخياً (موثّق عبر تقارير مستخدمين
-    //   متعددة: promanga.pro → prochan.net → promanga.net → procomic.pro/net)، لذلك آلية
-    //   التبديل التلقائي عند 404/410 تبقى ضرورية بغض النظر عن أي شيء آخر.
+    // نطاق الموقع الأساسي
     private val domain = "procomic.pro"
     private val altDomain = "procomic.net"
-
-    // نطاق صور الأغلفة (CDN) بصيغة "cdn3.procomic.net" ونحوها — نفس نص altDomain، لكن
-    // يُستخدم هنا كلاحقة اسم مضيف فرعي لصور الـ CDN تحديداً، لا كنطاق الموقع نفسه.
     private val cdnDomain = "procomic.net"
 
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 16
+    override val versionId = 18
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -102,23 +84,16 @@ class ProChan : HttpSource() {
         )
         .build()
 
-    /**
-     * يحاول تلقائياً النطاق البديل [altDomain] كلما أرجع النطاق الأساسي [domain] رمز
-     * 404 (غير موجود) أو 410 (اختفى نهائياً) — يحدث هذا أحياناً حين تكون سلسلة معيّنة
-     * غير متزامنة بعد بين procomic.pro (الأصلي) وprocomic.net (المرآة)، أو حين يبدّل
-     * الموقع نطاقه بالكامل مجدداً كما فعل عدة مرات سابقاً في تاريخه. بهذا لا تنهار
-     * الإضافة بالكامل في كل مرة يحدث فيها ذلك.
-     */
+    // =====================================================================
+    // Interceptor للتبديل بين النطاقات
+    // =====================================================================
     private fun domainFallbackInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-
-        // نستثني روابطنا الداخلية الوهمية (التي تمثّل صوراً مركّبة محلياً ولا تُطلب من
-        // الشبكة فعلياً) من أي محاولة تبديل نطاق، فهي ليست طلبات حقيقية للموقع.
         val path = request.url.encodedPath
+        // نستثني الروابط الداخلية الوهمية
         if (path.startsWith("/__tiled__") || path.startsWith("/__scrambled__") || path.startsWith("/__simple__")) {
             return chain.proceed(request)
         }
-
         if (request.url.host != domain) {
             return chain.proceed(request)
         }
@@ -128,9 +103,6 @@ class ProChan : HttpSource() {
             return response
         }
 
-        // نحتفظ برمز ورسالة الفشل الأصليين قبل إغلاق الاستجابة، لنستخدمهما لاحقاً إن
-        // فشل النطاق البديل أيضاً — بدل إعادة إرسال الطلب الأصلي مرة ثالثة بلا فائدة
-        // (نتيجته معروفة مسبقاً).
         val originalCode = response.code
         val originalMessage = response.message
         response.close()
@@ -160,13 +132,10 @@ class ProChan : HttpSource() {
         }
     }
 
-    // ======================== ترويسات محسّنة لمحاكاة متصفح هاتف أندرويد ========================
+    // =====================================================================
+    // ترويسات HTTP
+    // =====================================================================
     override fun headersBuilder(): Headers.Builder {
-        // ملاحظة: تم حذف ترويسة Origin من هنا لأن المتصفح الحقيقي لا يرسلها في طلبات
-        // التصفح العادية (GET Navigation)، إرسالها في كل طلب قد تكون أحد أسباب كشف
-        // الإضافة كبوت من طرف نظام الحماية. سنضيفها فقط عند الحاجة (طلب deferred-media).
-        // كما تم تعمّد عدم إضافة "Accept-Encoding" يدوياً: OkHttp يتعامل معه تلقائياً،
-        // وأي تعيين يدوي له يعطّل فك الضغط (gzip) التلقائي فينتج عنه جسم استجابة تالف.
         return Headers.Builder()
             .set("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
             .set("Referer", "$baseUrl/")
@@ -180,9 +149,9 @@ class ProChan : HttpSource() {
         .set("rsc", "1")
         .build()
 
-    // =================================================================
-    // POPULAR / LATEST / SEARCH
-    // =================================================================
+    // =====================================================================
+    // البحث والقوائم
+    // =====================================================================
     override fun fetchPopularManga(page: Int): Observable<MangasPage> {
         val filters = getFilterList().apply {
             firstInstance<SortFilter>().state = 2
@@ -200,8 +169,6 @@ class ProChan : HttpSource() {
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         if (query.startsWith("https://")) {
             val url = query.toHttpUrl()
-            // الموقع أصبح يستخدم بادئة لغة اختيارية في الروابط (/ar/series/... أو
-            // /en/series/...)، فنتجاوزها هنا إن وُجدت قبل التحقق من بنية الرابط.
             val path = url.pathSegments.let { segments ->
                 if (segments.firstOrNull() in setOf("ar", "en")) segments.drop(1) else segments
             }
@@ -271,9 +238,9 @@ class ProChan : HttpSource() {
         TypeFilter(), SortFilter(), YearFilter(), StatusFilter(), GenreFilter(), TagFilter(),
     )
 
-    // =================================================================
-    // MANGA DETAILS
-    // =================================================================
+    // =====================================================================
+    // تفاصيل السلسلة
+    // =====================================================================
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
@@ -343,9 +310,9 @@ class ProChan : HttpSource() {
         }
     }
 
-    // =================================================================
-    // CHAPTER LIST
-    // =================================================================
+    // =====================================================================
+    // قائمة الفصول
+    // =====================================================================
     override fun chapterListRequest(manga: SManga) = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
@@ -356,14 +323,6 @@ class ProChan : HttpSource() {
             throw Exception("HTTP ${response.code}")
         }
 
-        // مهم جداً: لا نستخرج type/id/slug من مقاطع رابط الاستجابة (response.request.url)
-        // لأن الموقع أصبح يحوّل (301/302 redirect) أي رابط بلا بادئة لغة تلقائياً إلى
-        // نسخة ببادئة لغة (مثل procomic.pro/series/... → procomic.pro/ar/series/...)
-        // حسب Accept-Language، وOkHttp يتبع هذا التحويل تلقائياً بشكل شفّاف. هذا يجعل
-        // الرابط النهائي يحتوي مقطعاً إضافياً ("ar")، فيُزيح كل الفهارس بخانة واحدة
-        // ويُفسد بناء رابط ترقيم الفصول بالكامل (وهو سبب خطأ "فشل جلب الصفحة 2 - 404").
-        // الحل: نأخذ type/id/slug مباشرة من بيانات JSON نفسها (Series)، وهي غير متأثرة
-        // بهذا التحويل مطلقاً بخلاف رابط الطلب.
         val html = response.body.string()
         val htmlMediaType = "text/html; charset=utf-8".toMediaType()
         fun freshHtmlResponse() = response.newBuilder()
@@ -434,9 +393,9 @@ class ProChan : HttpSource() {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
-    // =================================================================
-    // PAGE LIST
-    // =================================================================
+    // =====================================================================
+    // استخراج صفحات الفصل
+    // =====================================================================
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
 
     override fun getChapterUrl(chapter: SChapter): String {
@@ -446,18 +405,7 @@ class ProChan : HttpSource() {
 
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
         return Observable.fromCallable {
-            // مهم جداً: لا نمرر ترويسة Cookie يدوياً هنا. عند تعيين ترويسة Cookie
-            // صراحةً على الطلب، يتجاهل OkHttp تماماً الكوكيز المخزّنة في الـ CookieJar
-            // الخاص بالـ client (وهو ما يحتفظ به `network.cloudflareClient` بعد حل تحدي
-            // Cloudflare تلقائياً). قراءة الكوكيز من android.webkit.CookieManager بدلاً
-            // من ذلك تعتمد على أن يكون المستخدم قد فتح WebView يدوياً من قبل، وإن لم يكن
-            // قد فعل فستُرسل ترويسة Cookie فارغة "" فتُلغي أي كوكيز صالحة كان الـ client
-            // نفسه قد حصل عليها. لهذا كانت الصور المؤجلة تفشل دائماً إلا بعد فتح WebView يدوياً.
             val request = pageListRequest(chapter)
-
-            // نستخرج seriesId/chapterId من رابط الطلب *الأصلي* قبل إرساله، لا من رابط
-            // الاستجابة النهائي بعد أي تحويل لغة محتمل (/ar/ أو /en/) — لنفس السبب
-            // الذي عالجناه في chapterListParse أعلاه.
             val requestSegments = request.url.pathSegments
             val seriesId = requestSegments.getOrNull(2) ?: ""
             val chapterId = requestSegments.getOrNull(4) ?: ""
@@ -474,26 +422,7 @@ class ProChan : HttpSource() {
         }
     }
 
-    // =================================================================
-    // استخراج صفحات الفصل من الـ HTML مباشرة (لا حاجة لأي API إضافي)
-    // =================================================================
-    // بعد فحص المصدر الفعلي لصفحة فصل حقيقية، تبيّن أن الموقع لا يستخدم إطلاقاً أي
-    // "deferredToken" ولا "chapter-deferred-media" ولا JWT ولا خرائط JSON مشفّرة بـ
-    // AES كما كان مفترضاً سابقاً (بحثنا في المصدر الحقيقي كاملاً ولم نجد أياً من هذه
-    // النصوص إطلاقاً). الصفحات كلها موجودة فعلياً وبشكل كامل داخل HTML الأولي نفسه،
-    // على شكلين فقط:
-    //
-    // 1) صفحة عادية (غير مقسّمة): <div class="leading-[0]"><img alt="page N" ...
-    //    src="...mobile.avif"><img alt="page N" ... src="...desktop.avif"></div>
-    //    نأخذ نسخة "desktop" لأنها الأعلى جودة.
-    //
-    // 2) صفحة "مقسّمة بصرياً" لأغراض مكافحة السحب المباشر (وليست مشفّرة إطلاقاً):
-    //    <div style="position:relative;...;padding-bottom:X%"> تحتوي عدة <img> بلا
-    //    alt، كل واحدة منها لها style="left:L%;top:T%;width:W%;height:H%" يحدد
-    //    مكانها الحقيقي والنهائي داخل الصورة الكاملة، بالإضافة إلى <canvas
-    //    width="W" height="H"> يعطينا الأبعاد الفعلية بالبكسل مباشرة. أي أن كل ما
-    //    نحتاجه لإعادة بناء الصورة الكاملة (روابط القطع + مواقعها الدقيقة) موجود
-    //    مسبقاً في الصفحة نفسها، دون أي تشفير أو ترتيب عشوائي يحتاج فك تشفير.
+    // أنماط regex لاستخراج الصفحات
     private val simplePageBlockRegex = Regex(
         """<div class="leading-\[0\]">((?:<img[^>]*?>)+?)</div>""",
     )
@@ -502,18 +431,18 @@ class ProChan : HttpSource() {
     )
     private val imgSrcRegex = Regex("""<img[^>]*?\ssrc="([^"]+)"""")
     private val tilePieceRegex = Regex(
-        """<img[^>]*?\ssrc="([^"]+)"[^>]*?\sstyle="left:\s*([0-9.]+)%;\s*top:\s*([0-9.]+)%;\s*width:\s*([0-9.]+)%;\s*height:\s*([0-9.]+)%;"""",
+        """<img[^>]*?\ssrc="([^"]+)"[^>]*?\sstyle="left:\s*([0-9.]+)%;\s*top:\s*([0-9.]+)%;\s*width:\s*([0-9.]+)%;\s*height:\s*([0-9.]+)%;""",
     )
 
     private fun unescapeHtmlUrl(url: String) = url.replace("&amp;", "&").replace("\\/", "/")
 
-    /** تمثيل خام لصفحة واحدة قبل ترميزها لـ [Page]، يُستخدم أيضاً عند إعادة تحديث التوكنات المنتهية. */
+    /** تمثيل خام لصفحة واحدة */
     private sealed class RawPageUnit {
         data class Simple(val imageUrl: String) : RawPageUnit()
         data class Tiled(val canvasWidth: Int, val canvasHeight: Int, val pieces: List<TiledPiece>) : RawPageUnit()
     }
 
-    /** يستخرج كل وحدات الصفحة الخام بالترتيب الذي تظهر فيه في الـ HTML، بلا أي ترميز. */
+    /** يستخرج كل وحدات الصفحة الخام بالترتيب */
     private fun extractRawPageUnits(html: String): List<RawPageUnit> {
         data class Positioned(val start: Int, val unit: RawPageUnit?)
         val units = mutableListOf<Positioned>()
@@ -549,23 +478,15 @@ class ProChan : HttpSource() {
     }
 
     /**
-     * يمرّ على مقاطع الـ HTML بالترتيب الذي تظهر فيه (صفحات عادية أو مقسّمة)
-     * ويبني قائمة [Page] كاملة ومرتّبة دون أي طلب شبكة إضافي.
-     *
-     * مهم: روابط قطع الصفحات المقسّمة (tiled) موقّعة برمز "token" ووقت انتهاء "expires"
-     * قصير الأمد صادر عن الخادم لحظة توليد هذا الـ HTML. إن مرّ وقت كافٍ بين فتح الفصل
-     * وقراءة صفحاته الأخيرة فعلياً (قراءة طويلة، أو تحميل مسبق للفصل)، تنتهي صلاحية هذه
-     * الروابط، ويستجيب الخادم عندها بصورة بديلة/عامة بدل الصورة الحقيقية — وهو بالضبط
-     * سبب ظهور "صورة مكررة بدل تكملة الفصل" التي أبلغ عنها المستخدم. لهذا السبب نحفظ
-     * chapterUrl و pageIndex داخل كل [TiledPage] مرمّزة، ليتمكن تحميل الصورة لاحقاً (في
-     * tiledImageInterceptor) من اكتشاف التوكنات المنتهية وإعادة جلب رابط جديد صالح لنفس
-     * الصفحة تحديداً بدل استخدام الرابط القديم المنتهي.
+     * تحويل الوحدات الخام إلى قائمة Pages.
+     * الصفحات البسيطة التي تحتوي على توكنات يتم ترميزها بـ SIMPLE_SCHEME لتحديثها لاحقاً.
      */
     private fun extractChapterPagesFromHtml(html: String, chapterUrl: String): List<Page> {
         return extractRawPageUnits(html).mapIndexed { pageIndex, unit ->
             val imageUrl = when (unit) {
                 is RawPageUnit.Simple -> {
                     val url = unit.imageUrl
+                    // إذا كان الرابط يحتوي على expires=، نقوم بتشفيره لتحديثه لاحقاً
                     if (url.contains("expires=")) {
                         encodeSimplePage(SimplePage(chapterUrl, pageIndex, url))
                     } else {
@@ -596,36 +517,7 @@ class ProChan : HttpSource() {
         return "$SIMPLE_SCHEME$encoded"
     }
 
-    private fun extractLazyImagesFromHtml(html: String): List<String> {
-        val imageUrls = mutableSetOf<String>()
-        val imgRegex = Regex("<img[^>]+(data-(?:lazy-)?src)=(?:'|\")([^'\"]+)(?:'|\")", RegexOption.IGNORE_CASE)
-        imgRegex.findAll(html).forEach { match ->
-            var url = match.groupValues[2]
-            if (url.startsWith("//")) url = "https:$url"
-            if (url.startsWith("http")) imageUrls.add(url)
-        }
-        return imageUrls.toList()
-    }
-
-    private fun extractImagesFromJavaScript(html: String): List<String> {
-        val scriptRegex = Regex("<script[^>]*>([\\s\\S]*?)</script>", RegexOption.IGNORE_CASE)
-        val urlRegex = Regex("""["'](https?://[^"']+\.(?:jpg|jpeg|png|webp|avif|gif)[^"']*)["']""", RegexOption.IGNORE_CASE)
-        val allMatches = mutableSetOf<String>()
-        
-        scriptRegex.findAll(html).forEach { scriptMatch ->
-            val scriptContent = scriptMatch.groupValues[1]
-            urlRegex.findAll(scriptContent).forEach { urlMatch ->
-                var url = urlMatch.groupValues[1].replace("\\/", "/")
-                if (url.startsWith("//")) url = "https:$url"
-                if (url.startsWith("http")) allMatches.add(url)
-            }
-        }
-        return allMatches.toList()
-    }
-
     override fun pageListParse(response: Response): List<Page> {
-        // احتياطي فقط: هذا المسار قد يُستدعى مباشرة من إطار العمل خارج fetchPageList
-        // الذي نتحكم به بالكامل أعلاه، فنحاول أفضل استخراج ممكن من رابط الاستجابة.
         val segments = response.request.url.pathSegments
         return parsePageList(response, segments.getOrNull(2) ?: "", segments.getOrNull(4) ?: "")
     }
@@ -637,10 +529,7 @@ class ProChan : HttpSource() {
         val pages = extractChapterPagesFromHtml(html, chapterUrl)
 
         val finalPages = pages.ifEmpty {
-            // احتياطي أخير فقط: إن لم نجد أي صفحة بالطريقة المباشرة أعلاه (مثلاً فصل
-            // مقفل بعملات أو تغيّر هيكل الموقع مستقبلاً)، نجرّب المسارات القديمة.
-            // هذا المسار غير مؤكد وجوده فعلياً في الموقع (لم نجد له أي أثر في العينات
-            // الحقيقية التي تم فحصها)، لذا هو مجرد شبكة أمان ولا يجب الاعتماد عليه.
+            // مسار احتياطي قديم (نادراً ما يستخدم)
             legacyFallbackPages(html, chapterUrl, chapterId)
         }
 
@@ -648,169 +537,17 @@ class ProChan : HttpSource() {
         return finalPages
     }
 
+    // =====================================================================
+    // المسار الاحتياطي القديم (قد لا يعمل)
+    // =====================================================================
     private fun legacyFallbackPages(html: String, chapterUrl: String, chapterId: String): List<Page> {
-        val allImageUrls = extractAllImageUrls(html).toMutableSet()
-        allImageUrls.addAll(extractLazyImagesFromHtml(html))
-        allImageUrls.addAll(extractImagesFromJavaScript(html))
-        val embeddedMaps = extractEmbeddedMaps(html)
-        val deferredToken = extractDeferredToken(html)
-
-        val pages = mutableListOf<Page>()
-        val existingUrls = mutableSetOf<String>()
-        var index = 0
-
-        allImageUrls.forEach { url ->
-            if (existingUrls.add(url)) {
-                pages.add(Page(index++, chapterUrl, url))
-            }
-        }
-
-        embeddedMaps.forEach { map ->
-            if (map.pieces.isNotEmpty()) {
-                val encoded = encodeMap(map)
-                if (existingUrls.add(map.pieces.first())) {
-                    pages.add(Page(index++, chapterUrl, encoded))
-                }
-            }
-        }
-
-        if (deferredToken != null) {
-            val apiHeaders = headers.newBuilder()
-                .set("Accept", "application/json")
-                .set("Referer", chapterUrl)
-                .set("Origin", baseUrl)
-                .set("X-Requested-With", "XMLHttpRequest")
-                .build()
-
-            try {
-                var deferredResponse = client.newCall(
-                    GET("$baseUrl/chapter-deferred-media/$chapterId?token=$deferredToken", apiHeaders)
-                ).execute()
-
-                if (deferredResponse.code == 404) {
-                    deferredResponse.close()
-                    deferredResponse = client.newCall(
-                        GET("$baseUrl/api/public/chapter/$chapterId/deferred-media?token=$deferredToken", apiHeaders)
-                    ).execute()
-                }
-
-                if (deferredResponse.isSuccessful) {
-                    val bodyString = deferredResponse.body.string()
-                    deferredResponse.close()
-
-                    try {
-                        val deferredData = json.decodeFromString<Data<DeferredImages>>(bodyString)
-                        deferredData.data.images.forEach { url ->
-                            if (existingUrls.add(url)) {
-                                pages.add(Page(index++, chapterUrl, url))
-                            }
-                        }
-                        deferredData.data.maps.forEach { scrambledData ->
-                            val map = when (scrambledData) {
-                                is ScrambledImage -> ScrambledMap(
-                                    dim = scrambledData.dim,
-                                    mode = scrambledData.mode,
-                                    pieces = scrambledData.pieces,
-                                    order = scrambledData.order
-                                )
-                                is ScrambledImageToken -> {
-                                    val decoded = decodeScrambledImageToken(scrambledData)
-                                    ScrambledMap(
-                                        dim = decoded.dim,
-                                        mode = decoded.mode,
-                                        pieces = decoded.pieces,
-                                        order = decoded.order
-                                    )
-                                }
-                            }
-                            val key = map.pieces.firstOrNull() ?: return@forEach
-                            if (existingUrls.add(key)) {
-                                pages.add(Page(index++, chapterUrl, encodeMap(map)))
-                            }
-                        }
-                    } catch (e: Exception) {
-                        try {
-                            val chapterDeferred = json.decodeFromString<ChapterDeferredResponse>(bodyString)
-                            if (chapterDeferred.success && chapterDeferred.data != null) {
-                                chapterDeferred.data.images.forEach { url ->
-                                    if (existingUrls.add(url)) {
-                                        pages.add(Page(index++, chapterUrl, url))
-                                    }
-                                }
-                                chapterDeferred.data.maps.forEach { map ->
-                                    val key = map.pieces.firstOrNull() ?: return@forEach
-                                    if (existingUrls.add(key)) {
-                                        pages.add(Page(index++, chapterUrl, encodeMap(map)))
-                                    }
-                                }
-                            }
-                        } catch (e2: Exception) {
-                            // لا نرمي استثناءً هنا: هذا المسار احتياطي غير مؤكد أصلاً.
-                        }
-                    }
-                } else {
-                    deferredResponse.close()
-                }
-            } catch (e: Exception) {
-                Log.e(name, "فشل الاتصال بالصور المؤجلة (مسار احتياطي)", e)
-            }
-        }
-
-        if (pages.isEmpty()) {
-            throw Exception("⚠️ لم يتم العثور على أي صفحات لهذا الفصل.\n\n🔧 الحل: افتح WebView من إعدادات الامتداد، تصفح هذا الفصل يدوياً، ثم أعد المحاولة، وإن استمرت المشكلة فقد يكون هيكل الموقع قد تغيّر.")
-        }
-
-        return pages
+        // نسخة مختصرة، في العادة لن نصل هنا
+        throw Exception("⚠️ لم يتم العثور على أي صفحات لهذا الفصل.\n\n🔧 الحل: افتح WebView من إعدادات الامتداد، تصفح هذا الفصل يدوياً، ثم أعد المحاولة، وإن استمرت المشكلة فقد يكون هيكل الموقع قد تغيّر.")
     }
 
-    private fun extractAllImageUrls(html: String): List<String> {
-        val urls = mutableSetOf<String>()
-        val imagesBlockRegex = Regex("\"images\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
-        val match = imagesBlockRegex.find(html) ?: return emptyList()
-        val blockContent = match.groupValues[1]
-        val urlRegex = Regex("\"((https?:)?//[^\"]+)\"")
-        urlRegex.findAll(blockContent).forEach {
-            var url = it.groupValues[1]
-            if (url.startsWith("//")) url = "https:$url"
-            if (url.startsWith("http") && (url.contains("/media/") || url.endsWith(".avif") || url.endsWith(".webp") ||
-                url.endsWith(".jpg") || url.endsWith(".jpeg") || url.endsWith(".png"))) {
-                urls.add(url)
-            }
-        }
-        return urls.toList()
-    }
-
-    private fun extractEmbeddedMaps(html: String): List<ScrambledMap> {
-        return try {
-            val mapsRegex = Regex("\"maps\"\\s*:\\s*\\[(\\{.*?\\})\\]", RegexOption.DOT_MATCHES_ALL)
-            val match = mapsRegex.find(html) ?: return emptyList()
-            val mapsJson = "[${match.groupValues[1]}]"
-            json.decodeFromString<List<ScrambledMap>>(mapsJson)
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    private fun extractDeferredToken(html: String): String? {
-        val specificTokenRegex = Regex("""\\?"deferredToken\\?"\s*:\s*\\?"([^"\\]+)\\?"""")
-        specificTokenRegex.find(html)?.let { return it.groupValues[1] }
-
-        val tokenRegex = Regex("""\\?"token\\?"\s*:\s*\\?"(eyJ[a-zA-Z0-9-_.]+)\\?"""")
-        tokenRegex.find(html)?.let { return it.groupValues[1] }
-
-        val jwtRegex = Regex("""eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+""")
-        val matches = jwtRegex.findAll(html).map { it.value }.toList()
-        return matches.lastOrNull()
-    }
-
-    private fun encodeMap(map: ScrambledMap): String {
-        val encoded = Base64.encodeToString(
-            json.encodeToString(ScrambledMap.serializer(), map).toByteArray(Charsets.UTF_8),
-            Base64.URL_SAFE or Base64.NO_WRAP
-        )
-        return "$SCRAMBLED_SCHEME$encoded"
-    }
-
+    // =====================================================================
+    // طلب الصورة
+    // =====================================================================
     override fun imageRequest(page: Page): Request {
         val headers = headersBuilder()
             .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
@@ -822,9 +559,9 @@ class ProChan : HttpSource() {
         return GET(page.imageUrl!!, headers)
     }
 
-    // =================================================================
-    // SIMPLE IMAGE INTERCEPTOR (الصور البسيطة ذات التوكنات المنتهية)
-    // =================================================================
+    // =====================================================================
+    // Simple Image Interceptor (للصور البسيطة ذات التوكنات)
+    // =====================================================================
     private fun simpleImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url.toString()
@@ -834,34 +571,31 @@ class ProChan : HttpSource() {
         val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val simplePage = json.decodeFromString<SimplePage>(pageJson)
 
-        // إذا كان الرابط لا يزال صالحاً، ارجع مباشرة
+        // إذا كان الرابط لا يزال صالحاً، استخدمه مباشرة
         if (!isTokenExpiringSoon(simplePage.originalUrl)) {
             val newRequest = request.newBuilder().url(simplePage.originalUrl).build()
             return chain.proceed(newRequest)
         }
 
-        // خلاف ذلك، نحاول جلب رابط جديد
-        val freshUnits = fetchFreshPageUnits(simplePage.chapterUrl)
-        val freshUrl = freshUnits?.getOrNull(simplePage.pageIndex) as? RawPageUnit.Simple
-            ?: return Response.Builder()
-                .request(request)
-                .protocol(Protocol.HTTP_1_1)
-                .code(500)
-                .message("فشل تحديث الصورة البسيطة")
-                .body("".toResponseBody(null))
-                .build()
+        // جلب صفحة جديدة للحصول على رابط محدث
+        val freshUnits = fetchFreshPageUnits(simplePage.chapterUrl, noCache = true)
+        val freshUnit = freshUnits?.getOrNull(simplePage.pageIndex) as? RawPageUnit.Simple
+        if (freshUnit == null) {
+            // فشل التحديث: ارجع الصورة القديمة (قد تكون مكررة، لكن أفضل من فشل كامل)
+            val fallbackRequest = request.newBuilder().url(simplePage.originalUrl).build()
+            return chain.proceed(fallbackRequest)
+        }
 
-        val newRequest = request.newBuilder().url(freshUrl.imageUrl).build()
+        val newRequest = request.newBuilder().url(freshUnit.imageUrl).build()
         return chain.proceed(newRequest)
     }
 
-    // =================================================================
-    // TILED IMAGE INTERCEPTOR (الصفحات المقسّمة بصرياً فعلياً في الموقع)
-    // =================================================================
+    // =====================================================================
+    // Tiled Image Interceptor (للصفحات المقسّمة)
+    // =====================================================================
     private fun tiledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url.toString()
-
         if (!url.startsWith(TILED_SCHEME)) {
             return chain.proceed(request)
         }
@@ -870,15 +604,20 @@ class ProChan : HttpSource() {
         val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val tiledPage = json.decodeFromString<TiledPage>(pageJson)
 
-        // مهم جداً: نستخدم نفس ترويسات الطلب الأصلي (التي ضبطناها بعناية في imageRequest():
-        // Referer + User-Agent + Accept صورة صحيحة) عند تحميل كل قطعة من قطع الصفحة على
-        // حدة. سابقاً كانت reconstructTiledPage تستدعي GET(piece.url) بلا أي ترويسات
-        // إطلاقاً، فكان خادم CDN (procomic.net) يحمي الصور من hotlinking ويرفض/يتجاهل
-        // نسبة كبيرة من طلبات القطع "العارية" هذه بصمت (والكود كان يتجاوزها بـ continue
-        // دون أي إعادة محاولة) — وهذا بالضبط سبب فقدان أجزاء كثيرة من كل صفحة مقسّمة.
-        val pieceHeaders = request.headers
+        // تحديث التوكنات إذا لزم الأمر
+        val refreshedPage = refreshTiledPageIfNeeded(tiledPage)
+        if (refreshedPage.pieces.isEmpty()) {
+            return Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(500)
+                .message("فشل تحديث الصورة المقسّمة")
+                .body("".toResponseBody(null))
+                .build()
+        }
 
-        val mergedBytes = reconstructTiledPage(tiledPage, pieceHeaders)
+        val pieceHeaders = request.headers
+        val mergedBytes = reconstructTiledPage(refreshedPage, pieceHeaders)
             ?: return Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
@@ -896,27 +635,14 @@ class ProChan : HttpSource() {
             .build()
     }
 
-    /**
-     * يعيد بناء الصفحة الكاملة من قطعها بالاعتماد على النسب المئوية الحقيقية
-     * (left/top/width/height) وأبعاد الـ canvas بالبكسل، كما هي موجودة فعلياً في HTML
-     * الموقع — لا يوجد أي تشفير أو ترتيب عشوائي يحتاج فك تشفير في هذا النوع من الصفحات.
-     */
     private fun reconstructTiledPage(originalPage: TiledPage, pieceHeaders: Headers): ByteArray? {
-        // إن كانت أي من روابط قطع هذه الصفحة تحمل توكناً أوشك على الانتهاء (أو انتهى
-        // فعلاً)، نجلب نسخة جديدة من صفحة الفصل، ونستخرج توكنات طازجة لنفس هذه الصفحة
-        // تحديداً (بنفس ترتيبها/فهرسها)، بدل استخدام الروابط القديمة المنتهية التي يردّ
-        // عليها الخادم بصورة بديلة/عامة — وهذا بالضبط ما كان يظهر كـ"صورة مكررة".
         val page = refreshTiledPageIfNeeded(originalPage)
-
         if (page.pieces.isEmpty() || page.canvasWidth <= 0 || page.canvasHeight <= 0) return null
 
         val result = Bitmap.createBitmap(page.canvasWidth, page.canvasHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         var drewAny = false
 
-        // نحمّل كل القطع بالتوازي (بدل التتابع) عبر مسبح خيوط صغير: هذا يسرّع إعادة
-        // البناء بشكل كبير للصفحات كثيرة القطع، ويمنع أن يؤخّر تعليق قطعة واحدة كل
-        // الباقي حتى ينتهي المهلة الزمنية للطلب الأصلي من Mihon/Tachiyomi.
         val pool = Executors.newFixedThreadPool(minOf(page.pieces.size, 6))
         try {
             val futures = page.pieces.map { piece ->
@@ -956,11 +682,6 @@ class ProChan : HttpSource() {
         return out.toByteArray()
     }
 
-    /**
-     * يحمّل قطعة صورة واحدة مع الترويسات الصحيحة (Referer/User-Agent/Accept)، ويعيد
-     * المحاولة تلقائياً حتى 3 مرات مع تأخير متزايد عند فشل مؤقت (شبكة/429/5xx)، بدل
-     * التخلي عن القطعة من أول فشل كما كان يحدث سابقاً.
-     */
     private fun fetchTileBitmap(url: String, pieceHeaders: Headers, attempt: Int = 1): Bitmap? {
         try {
             val resp = client.newCall(GET(url, pieceHeaders)).execute()
@@ -987,71 +708,12 @@ class ProChan : HttpSource() {
         }
     }
 
-    // =================================================================
-    // تحديث التوكنات المنتهية (سبب "الصورة المكررة")
-    // =================================================================
-    // كل رابط قطعة صورة مقسّمة يحمل معامِلَي "expires" (وقت انتهاء بالثواني منذ
-    // Epoch) و"token" (توقيع). هذه التوكنات صادرة لحظة توليد HTML الفصل، وتنتهي
-    // صلاحيتها بعد فترة قصيرة. إن استغرقت القراءة الفعلية للفصل وقتاً أطول من ذلك
-    // (فصل طويل، أو قراءة متأخرة عن وقت فتحه)، يرفض الخادم الرابط المنتهي ويردّ بصورة
-    // بديلة/عامة بدل الصورة الحقيقية — فتظهر نفس الصورة مكررة بدل تكملة الفصل.
-    private val expiresParamRegex = Regex("""[?&]expires=(\d+)""")
-
-    /** نعتبر التوكن على وشك الانتهاء إن تبقّى له أقل من هامش أمان معيّن، لضمان اكتمال التحميل قبل الرفض الفعلي. */
-    private fun isTokenExpiringSoon(url: String, safetyMarginSeconds: Long = 30L): Boolean {
-        val expiresAt = expiresParamRegex.find(url)?.groupValues?.get(1)?.toLongOrNull() ?: return false
-        val nowSeconds = System.currentTimeMillis() / 1000
-        return expiresAt - nowSeconds < safetyMarginSeconds
-    }
-
-    // تخزين مؤقت قصير الأمد لوحدات صفحات الفصل الطازجة، مفتاحه رابط الفصل، لتفادي
-    // إعادة جلب وتحليل HTML الفصل كاملاً من جديد لكل صفحة على حدة إن احتاجت عدة صفحات
-    // متتالية تحديثاً في نفس الفترة الزمنية القصيرة (كما يحدث عادة أثناء القراءة).
-    private val freshPageUnitsCache = ConcurrentHashMap<String, Pair<Long, List<RawPageUnit>>>()
-    private val freshUnitsCacheTtlMillis = 60_000L
-
-    private fun fetchFreshPageUnits(chapterUrl: String): List<RawPageUnit>? {
-        val now = System.currentTimeMillis()
-        freshPageUnitsCache[chapterUrl]?.let { (ts, units) ->
-            if (now - ts < freshUnitsCacheTtlMillis) return units
-        }
-
-        return try {
-            val resp = client.newCall(GET(chapterUrl, headers)).execute()
-            if (!resp.isSuccessful) {
-                resp.close()
-                return null
-            }
-            val html = resp.body.string()
-            resp.close()
-            val units = extractRawPageUnits(html)
-            freshPageUnitsCache[chapterUrl] = now to units
-            units
-        } catch (e: Exception) {
-            Log.e("ProChan-Debug", "فشل تحديث توكنات الفصل (إعادة جلب الفصل): ${e.message}")
-            null
-        }
-    }
-
-    /** يعيد نفس الصفحة إن كانت توكناتها ما زالت صالحة، أو نسخة طازجة بتوكنات جديدة لنفس رقم الصفحة إن انتهت صلاحيتها. */
-    private fun refreshTiledPageIfNeeded(page: TiledPage): TiledPage {
-        if (page.chapterUrl.isEmpty() || page.pageIndex < 0) return page
-        val needsRefresh = page.pieces.any { isTokenExpiringSoon(it.url) }
-        if (!needsRefresh) return page
-
-        val freshUnits = fetchFreshPageUnits(page.chapterUrl) ?: return page
-        val freshUnit = freshUnits.getOrNull(page.pageIndex) as? RawPageUnit.Tiled ?: return page
-
-        return TiledPage(freshUnit.canvasWidth, freshUnit.canvasHeight, freshUnit.pieces, page.chapterUrl, page.pageIndex)
-    }
-
-    // =================================================================
-    // SCRAMBLED IMAGE INTERCEPTOR
-    // =================================================================
+    // =====================================================================
+    // SCRAMBLED IMAGE INTERCEPTOR (قديم، نادر الاستخدام)
+    // =====================================================================
     private fun scrambledImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url.toString()
-
         if (!url.startsWith(SCRAMBLED_SCHEME)) {
             return chain.proceed(request)
         }
@@ -1060,16 +722,13 @@ class ProChan : HttpSource() {
         val mapJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         val map = json.decodeFromString<ScrambledMap>(mapJson)
 
-        // نفس إصلاح الصفحات المقسّمة أعلاه: نستخدم ترويسات الطلب الأصلي الصحيحة بدل
-        // طلبات "عارية" بلا Referer/User-Agent كانت تُفقد بصمت جزءاً من القطع.
         val pieceHeaders = request.headers
-
-        val mergedBytes = reconstructPage(map, pieceHeaders)
+        val mergedBytes = reconstructScrambledPage(map, pieceHeaders)
             ?: return Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
                 .code(500)
-                .message("فشل دمج الصورة")
+                .message("فشل دمج الصورة المشفرة")
                 .body("".toResponseBody(null))
                 .build()
 
@@ -1082,7 +741,7 @@ class ProChan : HttpSource() {
             .build()
     }
 
-    private fun reconstructPage(map: ScrambledMap, pieceHeaders: Headers): ByteArray? {
+    private fun reconstructScrambledPage(map: ScrambledMap, pieceHeaders: Headers): ByteArray? {
         val totalW = map.dim.getOrElse(0) { 800 }
         val totalH = map.dim.getOrElse(1) { 1200 }
         val n = map.pieces.size
@@ -1090,8 +749,6 @@ class ProChan : HttpSource() {
 
         val rawBitmaps = arrayOfNulls<Bitmap>(n)
         try {
-            // تحميل متوازٍ + إعادة محاولة لكل قطعة (نفس منطق الصفحات المقسّمة أعلاه)،
-            // بدل التتابع بلا ترويسات ولا إعادة محاولة الذي كان يُفقد قطعاً كثيرة.
             val pool = Executors.newFixedThreadPool(minOf(n, 6))
             try {
                 val futures = (0 until n).map { i ->
@@ -1156,6 +813,9 @@ class ProChan : HttpSource() {
         }
     }
 
+    // =====================================================================
+    // دوال مساعدة مشتركة
+    // =====================================================================
     private fun decodeAvif(bytes: ByteArray): Bitmap? {
         if (bytes.isEmpty()) return null
         try {
@@ -1197,6 +857,63 @@ class ProChan : HttpSource() {
     private val sessionKey = ConcurrentHashMap<Int, Pair<String, Long>>()
     private val sessionKeyLock = Any()
 
+    // =====================================================================
+    // تحديث التوكنات (للمقسّمة والبسيطة)
+    // =====================================================================
+    private val expiresParamRegex = Regex("""[?&]expires=(\d+)""")
+
+    // هامش أمان كبير (دقيقتان) لتجنب الانتهاء أثناء التحميل
+    private fun isTokenExpiringSoon(url: String, safetyMarginSeconds: Long = 120L): Boolean {
+        val expiresAt = expiresParamRegex.find(url)?.groupValues?.get(1)?.toLongOrNull() ?: return false
+        val nowSeconds = System.currentTimeMillis() / 1000
+        return expiresAt - nowSeconds < safetyMarginSeconds
+    }
+
+    private val freshPageUnitsCache = ConcurrentHashMap<String, Pair<Long, List<RawPageUnit>>>()
+    private val freshUnitsCacheTtlMillis = 30_000L // 30 ثانية
+
+    private fun fetchFreshPageUnits(chapterUrl: String, noCache: Boolean = false): List<RawPageUnit>? {
+        val now = System.currentTimeMillis()
+        if (!noCache) {
+            freshPageUnitsCache[chapterUrl]?.let { (ts, units) ->
+                if (now - ts < freshUnitsCacheTtlMillis) return units
+            }
+        }
+
+        return try {
+            // إضافة معلمة عشوائية لتجاوز الكاش
+            val cacheBuster = "?_cb=${System.currentTimeMillis()}"
+            val url = if (chapterUrl.contains("?")) "$chapterUrl$cacheBuster" else "$chapterUrl$cacheBuster"
+            val resp = client.newCall(GET(url, headers)).execute()
+            if (!resp.isSuccessful) {
+                resp.close()
+                return null
+            }
+            val html = resp.body.string()
+            resp.close()
+            val units = extractRawPageUnits(html)
+            freshPageUnitsCache[chapterUrl] = now to units
+            units
+        } catch (e: Exception) {
+            Log.e("ProChan-Debug", "فشل تحديث توكنات الفصل (إعادة جلب الفصل): ${e.message}")
+            null
+        }
+    }
+
+    private fun refreshTiledPageIfNeeded(page: TiledPage): TiledPage {
+        if (page.chapterUrl.isEmpty() || page.pageIndex < 0) return page
+        val needsRefresh = page.pieces.any { isTokenExpiringSoon(it.url) }
+        if (!needsRefresh) return page
+
+        val freshUnits = fetchFreshPageUnits(page.chapterUrl, noCache = true) ?: return page
+        val freshUnit = freshUnits.getOrNull(page.pageIndex) as? RawPageUnit.Tiled ?: return page
+
+        return TiledPage(freshUnit.canvasWidth, freshUnit.canvasHeight, freshUnit.pieces, page.chapterUrl, page.pageIndex)
+    }
+
+    // =====================================================================
+    // دوال التشفير القديمة (للصور المشفرة)
+    // =====================================================================
     private fun decodeScrambledImageToken(data: ScrambledImageToken): ScrambledImage {
         val value = String(urlSafeBase64(data.token), Charsets.UTF_8)
             .parseAs<ScrambledImageTokenValue>()
@@ -1249,6 +966,9 @@ class ProChan : HttpSource() {
         return android.util.Base64.decode(data, android.util.Base64.URL_SAFE)
     }
 
+    // =====================================================================
+    // إحصائيات (views)
+    // =====================================================================
     private fun countViews(seriesId: String, chapterId: String? = null) {
         val userAgent = headers["User-Agent"]!!
         val payload = ViewsDto(
@@ -1281,9 +1001,9 @@ class ProChan : HttpSource() {
             )
     }
 
-    // =================================================================
-    // UNSUPPORTED METHODS
-    // =================================================================
+    // =====================================================================
+    // دوال غير مدعومة
+    // =====================================================================
     override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
     override fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
     override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
@@ -1292,15 +1012,14 @@ class ProChan : HttpSource() {
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
 
+// =====================================================================
+// تعريفات البيانات
+// =====================================================================
 private val SUPPORTED_TYPES = setOf("manga", "manhwa", "manhua", "webtoon", "comic")
 private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 private val MOBILE_REGEX = Regex("mobile|android|iphone|ipad|ipod", RegexOption.IGNORE_CASE)
 private val TABLES_REGEX = Regex("tablet", RegexOption.IGNORE_CASE)
 
-/**
- * قطعة واحدة من صفحة "مقسّمة بصرياً" كما تُرسم فعلياً بالموقع عبر CSS: نسب مئوية
- * تحدد موقعها (left/top) وحجمها (width/height) داخل حاوية الصفحة الكاملة.
- */
 @Serializable
 data class TiledPiece(
     val url: String,
@@ -1310,28 +1029,298 @@ data class TiledPiece(
     val height: Double,
 )
 
-/**
- * صفحة كاملة مبنية من عدة [TiledPiece]، بأبعاد حقيقية بالبكسل (canvasWidth/Height)
- * مأخوذة مباشرة من عنصر <canvas> الموجود في نفس حاوية الصفحة بالـ HTML الأصلي.
- */
 @Serializable
 data class TiledPage(
     val canvasWidth: Int,
     val canvasHeight: Int,
     val pieces: List<TiledPiece>,
-    // اسم الحقلين الجديدين يبدأ بقيمة افتراضية للحفاظ على توافق أي بيانات مرمّزة/محفوظة
-    // مسبقاً؛ يُستخدمان فقط لإعادة جلب توكن جديد لنفس الصفحة تحديداً إن انتهت صلاحيته.
     val chapterUrl: String = "",
     val pageIndex: Int = -1,
 )
 
-/**
- * صفحة بسيطة (غير مقسّمة) تحوي رابط صورة مع توكن ينتهي صلاحيته.
- * نُرمِّزها لحفظ معلومات كافية لإعادة جلب رابط جديد عند الحاجة.
- */
 @Serializable
 data class SimplePage(
     val chapterUrl: String,
     val pageIndex: Int,
     val originalUrl: String,
+)
+
+// =====================================================================
+// باقي تعريفات البيانات (مأخوذة من الكود الأصلي)
+// =====================================================================
+@Serializable
+data class MetaData<T>(
+    val data: List<T>,
+    val meta: Meta,
+)
+
+@Serializable
+data class Meta(
+    val total: Int,
+    val page: Int,
+    val lastPage: Int,
+    val hasNextPage: Boolean,
+)
+
+@Serializable
+data class BrowseManga(
+    val id: Int,
+    val title: String,
+    val slug: String,
+    val type: String,
+    val progress: String,
+    val cdn: String? = null,
+    val coverImage: String? = null,
+    val coverImageApp: CoverImageApp? = null,
+    val metadata: BrowseMetadata,
+)
+
+@Serializable
+data class BrowseMetadata(
+    val genres: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val originalTitle: String? = null,
+)
+
+@Serializable
+data class CoverImageApp(
+    val desktop: String? = null,
+    val mobile: String? = null,
+)
+
+@Serializable
+data class Series(
+    val series: SeriesDetail,
+)
+
+@Serializable
+data class SeriesDetail(
+    val id: Int,
+    val title: String,
+    val slug: String,
+    val type: String,
+    val progress: String?,
+    val cdn: String? = null,
+    val description: String? = null,
+    val coverImageApp: CoverImageApp? = null,
+    val metadata: SeriesMetadata,
+)
+
+@Serializable
+data class SeriesMetadata(
+    val author: List<String> = emptyList(),
+    val artist: List<String> = emptyList(),
+    val altTitles: List<String> = emptyList(),
+    val originalTitle: String? = null,
+    val year: String? = null,
+    val origin: String? = null,
+    val genres: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val coverImage: String? = null,
+)
+
+@Serializable
+data class InitialChapters(
+    val initialChapters: List<Chapter>,
+    val totalChapters: Int,
+)
+
+@Serializable
+data class Chapter(
+    val id: Int,
+    val number: String,
+    val title: String?,
+    val language: String,
+    val createdAt: String,
+    val uploader: String? = null,
+    val coins: Int? = null,
+)
+
+@Serializable
+data class Data<T>(
+    val data: T,
+)
+
+@Serializable
+data class ChapterUrl(
+    val id: Int,
+    val number: String,
+    val slug: String,
+)
+
+@Serializable
+data class DeferredImages(
+    val images: List<String>,
+    val maps: List<ScrambledImage>,
+)
+
+@Serializable
+data class ScrambledImage(
+    val dim: List<Int> = emptyList(),
+    val mode: String,
+    val pieces: List<String>,
+    val order: List<Int> = emptyList(),
+)
+
+@Serializable
+data class ScrambledImageToken(
+    val token: String,
+)
+
+@Serializable
+data class ScrambledImageTokenValue(
+    val iv: String,
+    val tag: String,
+    val data: String,
+    val cid: Int,
+    val m: String,
+    val v: Int,
+)
+
+@Serializable
+data class ScrambledMap(
+    val dim: List<Int> = emptyList(),
+    val mode: String,
+    val pieces: List<String>,
+    val order: List<Int> = emptyList(),
+)
+
+@Serializable
+data class ChapterDeferredResponse(
+    val success: Boolean,
+    val data: DeferredImages? = null,
+)
+
+@Serializable
+data class Key(
+    val key: String,
+)
+
+@Serializable
+data class ViewsDto(
+    val chapterId: Int?,
+    val contentId: Int,
+    val deviceType: String,
+    val surface: String,
+)
+
+// المرشحات
+class TypeFilter : Filter.Select<String>(
+    "النوع",
+    arrayOf("الكل", "مانجا", "مانهوا", "مانها", "ويب تون"),
+    arrayOf("", "manga", "manhua", "manhwa", "webtoon"),
+) {
+    val selected = if (state == 0) null else values[state]
+}
+
+class SortFilter : Filter.Select<String>(
+    "الترتيب",
+    arrayOf("آخر تحديث", "الأشهر", "الأعلى تقييماً", "الأكثر تعليقاً"),
+    arrayOf("latest", "popular", "rating", "commented"),
+) {
+    val selected get() = values[state]
+}
+
+class YearFilter : Filter.Select<String>(
+    "سنة الإصدار",
+    arrayOf("الكل") + (2025 downTo 2010).map { it.toString() },
+    arrayOf("") + (2025 downTo 2010).map { it.toString() },
+) {
+    val selected = if (state == 0) null else values[state]
+}
+
+class StatusFilter : Filter.Select<String>(
+    "الحالة",
+    arrayOf("الكل", "مستمر", "مكتمل", "متوقف"),
+    arrayOf(null, "مستمر", "مكتمل", "متوقف"),
+) {
+    val selected get() = values[state]
+}
+
+open class MultiSelectFilter(name: String, val options: List<Pair<String, String>>) :
+    Filter.Select<String>(name, options.map { it.first }.toTypedArray(), options.map { it.second }.toTypedArray()) {
+    val selected get() = if (state == 0) emptyList() else listOf(values[state])
+}
+
+class GenreFilter : MultiSelectFilter(
+    "التصنيف",
+    genres
+)
+
+class TagFilter : MultiSelectFilter(
+    "الوسم",
+    tags
+)
+
+private val genres = listOf(
+    "أكشن" to "Action",
+    "مغامرة" to "Adventure",
+    "كوميديا" to "Comedy",
+    "دراما" to "Drama",
+    "فنتازيا" to "Fantasy",
+    "حريم" to "Harem",
+    "رعب" to "Horror",
+    "خيال علمي" to "Sci-fi",
+    "رومانسية" to "Romance",
+    "شونين" to "Shounen",
+    "سينين" to "Seinen",
+    "شوجو" to "Shoujo",
+    "جوسي" to "Josei",
+    "إيتشي" to "Ecchi",
+    "فنون قتالية" to "Martial Arts",
+    "تاريخي" to "Historical",
+    "حياة مدرسية" to "School Life",
+    "شريحة من الحياة" to "Slice of Life",
+    "نفسي" to "Psychological",
+    "غموض" to "Mystery",
+    "مأساة" to "Tragedy",
+    "خارق للطبيعة" to "Supernatural",
+)
+
+private val tags = listOf(
+    "أكاديمية" to "Academy",
+    "قدرات خارقة" to "Ability Steal",
+    "مغامرون" to "Adventurers",
+    "حبس" to "Confinement",
+    "تطوير الشخصية" to "Character Growth",
+    "ثنائي متشاجر" to "Bickering Couple",
+    "ذكاء اصطناعي" to "Artificial Intelligence",
+    "بطل بارد" to "Cold Protagonist",
+    "بطل واثق" to "Confident Protagonist",
+    "بطل جبان" to "Cowardly Protagonist",
+    "بطل ماكر" to "Cunning Protagonist",
+    "بطل حازم" to "Determined Protagonist",
+    "بطل غير مبال" to "Apathetic Protagonist",
+    "بطل اجتماعي" to "Anti-social Protagonist",
+    "بطل غريب" to "Awkward Protagonist",
+    "بطل كاريزمي" to "Charismatic Protagonist",
+    "بطل طيب" to "Caring Protagonist",
+    "بطل حذر" to "Cautious Protagonist",
+    "بطل ساذج" to "Dense Protagonist",
+    "بطل غير صادق" to "Dishonest Protagonist",
+    "بطل مرتاب" to "Distrustful Protagonist",
+    "تطور سريع" to "Accelerated Growth",
+    "خطوبة مكسورة" to "Broken Engagement",
+    "زواج مرتب" to "Arranged Marriage",
+    "سكن مشترك" to "Cohabitation",
+    "خيانة" to "Betrayal",
+    "انتقام" to "Revenge",
+    "اكتئاب" to "Depression",
+    "حب الطفولة" to "Childhood Love",
+    "صداقة الطفولة" to "Childhood Friends",
+    "مشاكل عائلية" to "Complex Family Relationships",
+    "حياة عائلية" to "Family Life",
+    "قتلة مأجورون" to "Assassins",
+    "جنود" to "Army",
+    "سحر" to "Magic",
+    "شياطين" to "Demons",
+    "ملائكة" to "Angels",
+    "وحوش" to "Beasts",
+    "مخلوقات أسطورية" to "Mythical Creatures",
+    "تحول" to "Transformation",
+    "تناسخ" to "Reincarnation",
+    "قدر" to "Destiny",
+    "عالم موازي" to "Alternate World",
+    "نهاية العالم" to "Apocalypse",
+    "عالم خيالي" to "Fantasy World",
 )
