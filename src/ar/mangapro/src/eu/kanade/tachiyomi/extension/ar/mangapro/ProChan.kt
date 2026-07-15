@@ -79,17 +79,19 @@ class ProChan : HttpSource() {
 
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 15
+    override val versionId = 16
 
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
         private const val SCRAMBLED_SCHEME = "https://procomic.pro/__scrambled__/?map="
         private const val TILED_SCHEME = "https://procomic.pro/__tiled__/?map="
+        private const val SIMPLE_SCHEME = "https://procomic.pro/__simple__/?map="
     }
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::domainFallbackInterceptor)
+        .addInterceptor(::simpleImageInterceptor)
         .addInterceptor(::scrambledImageInterceptor)
         .addInterceptor(::tiledImageInterceptor)
         .addNetworkInterceptor(
@@ -113,7 +115,7 @@ class ProChan : HttpSource() {
         // نستثني روابطنا الداخلية الوهمية (التي تمثّل صوراً مركّبة محلياً ولا تُطلب من
         // الشبكة فعلياً) من أي محاولة تبديل نطاق، فهي ليست طلبات حقيقية للموقع.
         val path = request.url.encodedPath
-        if (path.startsWith("/__tiled__") || path.startsWith("/__scrambled__")) {
+        if (path.startsWith("/__tiled__") || path.startsWith("/__scrambled__") || path.startsWith("/__simple__")) {
             return chain.proceed(request)
         }
 
@@ -177,10 +179,6 @@ class ProChan : HttpSource() {
     private val rscHeaders = headersBuilder()
         .set("rsc", "1")
         .build()
-
-    // بقية الكود كما هو، مع التأكد من استخدام headersBuilder() بشكل صحيح
-    // ... (جميع الدوال الأخرى تبقى كما هي، مع تعديل بسيط في imageRequest للتأكد من استخدام build())
-    // سأقوم بإعادة كتابة الدوال التي استخدمت headersBuilder() و rscHeaders للتأكد من أنها صحيحة
 
     // =================================================================
     // POPULAR / LATEST / SEARCH
@@ -566,7 +564,14 @@ class ProChan : HttpSource() {
     private fun extractChapterPagesFromHtml(html: String, chapterUrl: String): List<Page> {
         return extractRawPageUnits(html).mapIndexed { pageIndex, unit ->
             val imageUrl = when (unit) {
-                is RawPageUnit.Simple -> unit.imageUrl
+                is RawPageUnit.Simple -> {
+                    val url = unit.imageUrl
+                    if (url.contains("expires=")) {
+                        encodeSimplePage(SimplePage(chapterUrl, pageIndex, url))
+                    } else {
+                        url
+                    }
+                }
                 is RawPageUnit.Tiled -> encodeTiledPage(
                     TiledPage(unit.canvasWidth, unit.canvasHeight, unit.pieces, chapterUrl, pageIndex),
                 )
@@ -581,6 +586,14 @@ class ProChan : HttpSource() {
             Base64.URL_SAFE or Base64.NO_WRAP,
         )
         return "$TILED_SCHEME$encoded"
+    }
+
+    private fun encodeSimplePage(page: SimplePage): String {
+        val encoded = Base64.encodeToString(
+            json.encodeToString(SimplePage.serializer(), page).toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_WRAP,
+        )
+        return "$SIMPLE_SCHEME$encoded"
     }
 
     private fun extractLazyImagesFromHtml(html: String): List<String> {
@@ -807,6 +820,39 @@ class ProChan : HttpSource() {
             .set("Sec-Fetch-Site", "same-site")
             .build()
         return GET(page.imageUrl!!, headers)
+    }
+
+    // =================================================================
+    // SIMPLE IMAGE INTERCEPTOR (الصور البسيطة ذات التوكنات المنتهية)
+    // =================================================================
+    private fun simpleImageInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url.toString()
+        if (!url.startsWith(SIMPLE_SCHEME)) return chain.proceed(request)
+
+        val encoded = url.removePrefix(SIMPLE_SCHEME)
+        val pageJson = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+        val simplePage = json.decodeFromString<SimplePage>(pageJson)
+
+        // إذا كان الرابط لا يزال صالحاً، ارجع مباشرة
+        if (!isTokenExpiringSoon(simplePage.originalUrl)) {
+            val newRequest = request.newBuilder().url(simplePage.originalUrl).build()
+            return chain.proceed(newRequest)
+        }
+
+        // خلاف ذلك، نحاول جلب رابط جديد
+        val freshUnits = fetchFreshPageUnits(simplePage.chapterUrl)
+        val freshUrl = freshUnits?.getOrNull(simplePage.pageIndex) as? RawPageUnit.Simple
+            ?: return Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(500)
+                .message("فشل تحديث الصورة البسيطة")
+                .body("".toResponseBody(null))
+                .build()
+
+        val newRequest = request.newBuilder().url(freshUrl.imageUrl).build()
+        return chain.proceed(newRequest)
     }
 
     // =================================================================
@@ -1277,4 +1323,15 @@ data class TiledPage(
     // مسبقاً؛ يُستخدمان فقط لإعادة جلب توكن جديد لنفس الصفحة تحديداً إن انتهت صلاحيته.
     val chapterUrl: String = "",
     val pageIndex: Int = -1,
+)
+
+/**
+ * صفحة بسيطة (غير مقسّمة) تحوي رابط صورة مع توكن ينتهي صلاحيته.
+ * نُرمِّزها لحفظ معلومات كافية لإعادة جلب رابط جديد عند الحاجة.
+ */
+@Serializable
+data class SimplePage(
+    val chapterUrl: String,
+    val pageIndex: Int,
+    val originalUrl: String,
 )
