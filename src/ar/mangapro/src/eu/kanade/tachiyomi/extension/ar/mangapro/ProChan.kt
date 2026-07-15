@@ -54,24 +54,31 @@ import javax.crypto.spec.SecretKeySpec
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
-    // ملاحظة مهمة: الموقع بدّل نطاقه الرئيسي أكثر من مرة خلال فترة قصيرة (من
-    // procomic.net إلى procomic.pro، والآن يبدو أنه رجع إلى procomic.net فعلياً — هذا
-    // مؤكد من فحص <link rel="canonical"> و og:url في مصدر صفحة حيّة فعلية أرسلها
-    // المستخدم بتاريخ اليوم). لهذا السبب:
-    // - اعتمدنا procomic.net كنطاق أساسي الآن (يطابق ما يقدّمه الموقع فعلياً حالياً).
-    // - أبقينا procomic.pro كنطاق بديل (altDomain) يُجرَّب تلقائياً عبر
-    //    domainFallbackInterceptor أدناه كلما أرجع النطاق الأساسي 404/410 — بدل الانهيار
-    //    الكامل في كل مرة يبدّل فيها الموقع نطاقه مجدداً مستقبلاً.
+    // ملاحظة مهمة حول النطاقات (مؤكدة مباشرة من صاحب/مُشغّل الموقع):
+    // - procomic.pro هو النطاق **الأصلي** الحقيقي للموقع، وprocomic.net "مرآة" رسمية —
+    //   كلاهما بنفس مستوى حماية Cloudflare تماماً، وكلاهما يخدم نفس الـ API الكامل
+    //   (/api/public/...)، فلا فرق وظيفي حقيقي بينهما من ناحية اكتمال البيانات.
+    // - المهم عملياً: أي متصفح حقيقي (WebView) يُعاد توجيهه تلقائياً من procomic.pro إلى
+    //   procomic.net من قبل الموقع نفسه (سلوك خادم، لا علاقة لكودنا به). هذا يعني: أي
+    //   كوكي تصريح Cloudflare (cf_clearance) يُحلّ عبر WebView يُخزَّن لنطاق procomic.net
+    //   تحديداً، لا procomic.pro. لذلك اعتماد procomic.pro كأساس لطلباتنا كان يجعلها لا
+    //   تستفيد إطلاقاً من ذلك الكوكي رغم فتح WebView — وهذا على الأرجح السبب الحقيقي وراء
+    //   استمرار مشاكل الحظر/403 رغم اتباع نصيحة "افتح WebView".
+    // - الحل: نجعل procomic.net (حيث يهبط أي متصفح حقيقي فعلياً) هو الأساس الآن، ونُبقي
+    //   procomic.pro كنطاق احتياطي فقط عبر domainFallbackInterceptor أدناه.
+    // - هذا الموقع أيضاً يُغيّر نطاقاته بشكل متكرر جداً تاريخياً (موثّق عبر تقارير مستخدمين
+    //   متعددة: promanga.pro → prochan.net → promanga.net → procomic.pro/net)، لذلك آلية
+    //   التبديل التلقائي عند 404/410 تبقى ضرورية مهما كان الترتيب.
     private val domain = "procomic.net"
     private val altDomain = "procomic.pro"
 
-    // نطاق صور الأغلفة (CDN) بصيغة "cdn3.procomic.net" ونحوها — نفس النص الأساسي
-    // لـ procomic.net، لكن يُستخدم هنا كلاحقة اسم مضيف فرعي، لا كنطاق مستقل.
+    // نطاق صور الأغلفة (CDN) بصيغة "cdn3.procomic.net" ونحوها — نفس نص domain، لكن
+    // يُستخدم هنا كلاحقة اسم مضيف فرعي لصور الـ CDN تحديداً، لا كنطاق الموقع نفسه.
     private val cdnDomain = "procomic.net"
 
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 12
+    override val versionId = 14
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -94,10 +101,10 @@ class ProChan : HttpSource() {
 
     /**
      * يحاول تلقائياً النطاق البديل [altDomain] كلما أرجع النطاق الأساسي [domain] رمز
-     * 404 (غير موجود) أو 410 (اختفى نهائياً) — هذا بالضبط ما يحدث الآن لبعض السلاسل:
-     * تُطلب صفحاتها عبر procomic.pro فيرجع 410، بينما هي موجودة وتعمل فعلياً على
-     * procomic.net. بهذا لا تنهار الإضافة بالكامل إن بدّل الموقع نطاقه (كلياً أو
-     * جزئياً لبعض السلاسل) مرة أخرى مستقبلاً.
+     * 404 (غير موجود) أو 410 (اختفى نهائياً) — يحدث هذا أحياناً حين تكون سلسلة معيّنة
+     * غير متزامنة بعد بين procomic.pro (الأصلي) وprocomic.net (المرآة)، أو حين يبدّل
+     * الموقع نطاقه بالكامل مجدداً كما فعل عدة مرات سابقاً في تاريخه. بهذا لا تنهار
+     * الإضافة بالكامل في كل مرة يحدث فيها ذلك.
      */
     private fun domainFallbackInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -279,7 +286,13 @@ class ProChan : HttpSource() {
             throw Exception("HTTP ${response.code}")
         }
 
-        val manga = response.extractNextJs<Series>()!!.series
+        val manga = response.extractNextJs<Series>()?.series
+            ?: throw Exception(
+                "⚠️ تعذّر قراءة بيانات السلسلة من الصفحة\n\n" +
+                    "🔧 الحل: افتح WebView من إعدادات الامتداد، تصفح هذه السلسلة يدوياً حتى تتأكد " +
+                    "من ظهورها بشكل صحيح في المتصفح، ثم ارجع واسحب لأسفل لتحديث التفاصيل.\n" +
+                    "(قد يكون الموقع غيّر بنية الصفحة، أو أن هذه السلسلة تحديداً غير متزامنة بين النطاقين)",
+            )
         return SManga.create().apply {
             url = "/series/${manga.type}/${manga.id}/${manga.slug}"
             title = manga.title
@@ -358,8 +371,17 @@ class ProChan : HttpSource() {
             .body(html.toResponseBody(htmlMediaType))
             .build()
 
-        val seriesInfo = freshHtmlResponse().extractNextJs<Series>()!!.series
-        val data = freshHtmlResponse().extractNextJs<InitialChapters>()!!
+        val seriesInfo = freshHtmlResponse().extractNextJs<Series>()?.series
+            ?: throw Exception(
+                "⚠️ تعذّر قراءة بيانات السلسلة عند جلب الفصول\n\n" +
+                    "🔧 الحل: افتح WebView، تصفح هذه السلسلة يدوياً، ثم ارجع واسحب لأسفل لتحديث قائمة الفصول.\n" +
+                    "(قد يكون الموقع غيّر بنية الصفحة، أو أن هذه السلسلة تحديداً غير متزامنة بين النطاقين)",
+            )
+        val data = freshHtmlResponse().extractNextJs<InitialChapters>()
+            ?: throw Exception(
+                "⚠️ تعذّر قراءة قائمة الفصول الأولية من الصفحة\n\n" +
+                    "🔧 الحل: افتح WebView، تصفح هذه السلسلة يدوياً، ثم ارجع واسحب لأسفل لتحديث قائمة الفصول.",
+            )
         val chapters = data.initialChapters.toMutableList()
         val size = chapters.size
         var page = 2
