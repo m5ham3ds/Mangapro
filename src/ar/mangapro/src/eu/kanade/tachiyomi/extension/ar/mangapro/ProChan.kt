@@ -54,31 +54,32 @@ import javax.crypto.spec.SecretKeySpec
 class ProChan : HttpSource() {
     override val name = "ProChan"
     override val lang = "ar"
-    // ملاحظة مهمة حول النطاقات (مؤكدة مباشرة من صاحب/مُشغّل الموقع):
-    // - procomic.pro هو النطاق **الأصلي** الحقيقي للموقع، وprocomic.net "مرآة" رسمية —
-    //   كلاهما بنفس مستوى حماية Cloudflare تماماً، وكلاهما يخدم نفس الـ API الكامل
-    //   (/api/public/...)، فلا فرق وظيفي حقيقي بينهما من ناحية اكتمال البيانات.
-    // - المهم عملياً: أي متصفح حقيقي (WebView) يُعاد توجيهه تلقائياً من procomic.pro إلى
-    //   procomic.net من قبل الموقع نفسه (سلوك خادم، لا علاقة لكودنا به). هذا يعني: أي
-    //   كوكي تصريح Cloudflare (cf_clearance) يُحلّ عبر WebView يُخزَّن لنطاق procomic.net
-    //   تحديداً، لا procomic.pro. لذلك اعتماد procomic.pro كأساس لطلباتنا كان يجعلها لا
-    //   تستفيد إطلاقاً من ذلك الكوكي رغم فتح WebView — وهذا على الأرجح السبب الحقيقي وراء
-    //   استمرار مشاكل الحظر/403 رغم اتباع نصيحة "افتح WebView".
-    // - الحل: نجعل procomic.net (حيث يهبط أي متصفح حقيقي فعلياً) هو الأساس الآن، ونُبقي
-    //   procomic.pro كنطاق احتياطي فقط عبر domainFallbackInterceptor أدناه.
+    // ملاحظة مهمة حول النطاقات (مؤكدة الآن من فحص مصدر صفحة حقيقية فعلياً، لا افتراضاً):
+    // - procomic.pro هو النطاق الذي يحتوي فعلياً على بيانات JSON الكاملة المُضمَّنة داخل
+    //   الصفحة (الفصول initialChapters وتفاصيل السلسلة series) — وهذه البيانات هي ما
+    //   تعتمد عليه طريقة عملنا بالكامل (استخراج JSON من الـ HTML مباشرة، دون استدعاء API
+    //   منفصل صراحة).
+    // - procomic.net يُقدّم لنفس مسار السلسلة نسخة "/info" (صفحة معلومات/تقييمات فقط)
+    //   لا تحتوي على initialChapters ولا series إطلاقاً — وقد تأكد هذا فعلياً بفحص مصدر
+    //   صفحة حقيقية لم تحتوِ ولا مرة واحدة على "initialChapters". والأهم: تلك الصفحة نفسها
+    //   تتضمن رابطاً داخلياً صريحاً يوجّه إلى procomic.pro لعرض السلسلة الكاملة — أي أن
+    //   الموقع نفسه يُعامل procomic.net كمرآة عرض/فهرسة خفيفة فقط، لا كنطاق وظيفي كامل.
+    // - لذلك procomic.pro هو الأساس الصحيح دائماً لطلبات تفاصيل السلسلة وقوائم الفصول،
+    //   وprocomic.net نطاق احتياطي فقط (قد يفيد لطلبات أخرى كالبحث، لكن لا يُعتمد عليه
+    //   لصفحات الفصول تحديداً).
     // - هذا الموقع أيضاً يُغيّر نطاقاته بشكل متكرر جداً تاريخياً (موثّق عبر تقارير مستخدمين
     //   متعددة: promanga.pro → prochan.net → promanga.net → procomic.pro/net)، لذلك آلية
-    //   التبديل التلقائي عند 404/410 تبقى ضرورية مهما كان الترتيب.
-    private val domain = "procomic.net"
-    private val altDomain = "procomic.pro"
+    //   التبديل التلقائي عند 404/410 تبقى ضرورية بغض النظر عن أي شيء آخر.
+    private val domain = "procomic.pro"
+    private val altDomain = "procomic.net"
 
-    // نطاق صور الأغلفة (CDN) بصيغة "cdn3.procomic.net" ونحوها — نفس نص domain، لكن
+    // نطاق صور الأغلفة (CDN) بصيغة "cdn3.procomic.net" ونحوها — نفس نص altDomain، لكن
     // يُستخدم هنا كلاحقة اسم مضيف فرعي لصور الـ CDN تحديداً، لا كنطاق الموقع نفسه.
     private val cdnDomain = "procomic.net"
 
     override val baseUrl = "https://$domain"
     override val supportsLatest = true
-    override val versionId = 14
+    override val versionId = 15
 
     private val json = Json { ignoreUnknownKeys = true }
 
